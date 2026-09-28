@@ -1,0 +1,23 @@
+{
+  "name": "dsh-computer-use",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Computer Use preset for official dsh. One agent-preset row, no floating ball.",
+  "exports": {
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@dsh-orb/computer-use": "file:../computer-use"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
