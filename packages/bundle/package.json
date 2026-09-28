@@ -1,0 +1,34 @@
+{
+  "name": "dsh-orb",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Installable Orb bundle. Stage 0 inserts an empty host plugin.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsdown"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@dsh-orb/host": "file:../host"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
