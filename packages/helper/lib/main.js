@@ -1,126 +1,324 @@
 import { BrowserWindow, app, ipcMain, screen } from "electron";
-import { mkdir, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-//#region src/page.ts
-/** Minimal ball page. One transcript, one input, and a draggable circle. */
-const ballHtml = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <title>dsh-orb</title>
-  <style>
-    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    #root { position: relative; width: 100%; height: 100%; }
-    #panel { display: none; position: absolute; left: 10px; right: 10px; top: 10px; bottom: 78px; flex-direction: column; border-radius: 16px; background: rgba(18, 22, 28, 0.94); color: #f4f7fb; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); overflow: hidden; }
-    body.expanded #panel { display: flex; }
-    #who { padding: 10px 12px 0; font-size: 12px; color: #9aa6b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    #log { flex: 1; overflow: auto; padding: 8px 12px; font-size: 13px; line-height: 1.45; }
-    .user { margin: 8px 0; color: #d6e6ff; white-space: pre-wrap; }
-    .assistant { margin: 8px 0; white-space: pre-wrap; }
-    .tool { margin: 8px 0; color: #8fd6b5; }
-    #status { padding: 0 12px 8px; min-height: 16px; font-size: 12px; color: #9aa6b2; }
-    form { display: flex; gap: 8px; padding: 0 12px 12px; }
-    input { flex: 1; border: 0; border-radius: 10px; padding: 8px 10px; background: #0f141b; color: white; }
-    button.send { border: 0; border-radius: 10px; background: #1d6fe8; color: white; padding: 0 12px; }
-    button.send:disabled, input:disabled { opacity: 0.6; }
-    #ball { position: absolute; right: 8px; bottom: 8px; width: 56px; height: 56px; border: 0; border-radius: 50%; padding: 0; background: radial-gradient(circle at 35% 30%, #b9e4ff, #1d6fe8 58%, #0b2a55); box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35); cursor: grab; }
-    #ball:focus-visible { outline: 2px solid white; outline-offset: 2px; }
-  </style>
-</head>
-<body>
-  <div id="root">
-    <div id="panel">
-      <div id="who">Orb</div>
-      <div id="log"></div>
-      <div id="status"></div>
-      <form id="form">
-        <input id="text" maxlength="4000" placeholder="让 Computer Use 操作这台电脑" autocomplete="off">
-        <button class="send" type="submit">发送</button>
-      </form>
-    </div>
-    <button id="ball" type="button" aria-label="悬浮球"></button>
-  </div>
-  <script>
-    const orb = window.dshOrb
-    const who = document.getElementById('who')
-    const log = document.getElementById('log')
-    const status = document.getElementById('status')
-    const form = document.getElementById('form')
-    const input = document.getElementById('text')
-    const ball = document.getElementById('ball')
-    let expanded = false
-    let dragging = false
-    let moved = false
-    let lastX = 0
-    let lastY = 0
-
-    function setExpanded(next) {
-      expanded = next
-      document.body.classList.toggle('expanded', expanded)
-      orb.setExpanded(expanded)
-      if (expanded) input.focus()
-    }
-
-    function addLine(role, text) {
-      const row = document.createElement('div')
-      row.className = role
-      row.textContent = role === 'tool' ? '工具 ' + text : text
-      log.appendChild(row)
-      log.scrollTop = log.scrollHeight
-    }
-
-    orb.onSession((id) => { who.textContent = 'Orb · ' + id })
-    orb.session().then((id) => { if (id) who.textContent = 'Orb · ' + id })
-    orb.onLine((line) => {
-      if (!line || typeof line.text !== 'string') return
-      if (line.role === 'status') {
-        status.textContent = line.text
-        const busy = line.text === '正在执行'
-        input.disabled = busy
-        form.querySelector('button').disabled = busy
-        return
-      }
-      addLine(line.role, line.text)
-    })
-
-    form.addEventListener('submit', (event) => {
-      event.preventDefault()
-      const text = input.value.trim()
-      if (!text || input.disabled) return
-      input.value = ''
-      orb.send(text)
-    })
-
-    ball.addEventListener('pointerdown', (event) => {
-      dragging = true
-      moved = false
-      lastX = event.screenX
-      lastY = event.screenY
-      ball.setPointerCapture(event.pointerId)
-    })
-    ball.addEventListener('pointermove', (event) => {
-      if (!dragging) return
-      const dx = event.screenX - lastX
-      const dy = event.screenY - lastY
-      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true
-      lastX = event.screenX
-      lastY = event.screenY
-      if (moved) orb.moveBy(dx, dy)
-    })
-    ball.addEventListener('pointerup', () => {
-      dragging = false
-      if (!moved) setExpanded(!expanded)
-    })
-  <\/script>
-</body>
-</html>
-`;
+const PANEL_SIZE = {
+	width: 320,
+	height: 420
+};
+const PANEL_WINDOW_SIZE = {
+	width: PANEL_SIZE.width + 24,
+	height: PANEL_SIZE.height + 24
+};
+const BELOW_CENTER = .08;
+const DOCK_OVERLAP = Math.round(72 / 5);
+const DOCK_DRAG_OFF = Math.round(24);
+function clamp(value, min, max) {
+	return Math.min(Math.max(value, min), Math.max(min, max));
+}
+function collapsedWindowBounds(ball) {
+	return {
+		x: ball.x - 12,
+		y: ball.y - 12,
+		width: 96,
+		height: 96
+	};
+}
+function isCollapsed(bounds) {
+	return bounds.width <= 96 && bounds.height <= 96;
+}
+function clampWindowOrigin(value, workOrigin, workSize, windowSize) {
+	return clamp(value, workOrigin - 12, workOrigin + workSize - windowSize + 12);
+}
+/** Which left or right display edge the ball already overlaps by about one fifth of its width. */
+function dockSideForBallOrigin(ball, bounds) {
+	const leftOverlap = bounds.x - ball.x;
+	const rightOverlap = ball.x + 72 - (bounds.x + bounds.width);
+	if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) return "left";
+	if (rightOverlap >= DOCK_OVERLAP) return "right";
+}
+/** Hittable strip for a docked tab, flush with a display edge. */
+function dockedTabBounds(side, ballY, bounds) {
+	const y = clamp(Math.round(ballY - 8), bounds.y, bounds.y + bounds.height - 88);
+	return {
+		x: side === "left" ? bounds.x : bounds.x + bounds.width - 34,
+		y,
+		width: 34,
+		height: 88
+	};
+}
+/** Panel growth that keeps the expanded overlay on the open side of the ball. */
+function expandDirection(ball, workArea) {
+	return {
+		horizontal: ball.x + 36 - workArea.x > workArea.width / 2 ? "left" : "right",
+		vertical: ball.y - workArea.y < PANEL_SIZE.height - 72 ? "down" : "up"
+	};
+}
+/** Ball top-left recovered from an expanded window and its growth direction. */
+function ballOriginFromWindow(bounds, direction) {
+	return {
+		x: direction.horizontal === "left" ? bounds.x + bounds.width - 12 - 72 : bounds.x + 12,
+		y: direction.vertical === "up" ? bounds.y + bounds.height - 12 - 72 : bounds.y + 12
+	};
+}
+/** Keep a 72px ball fully inside a work area. */
+function clampedBallOrigin(ball, workArea) {
+	return {
+		x: clamp(ball.x, workArea.x, workArea.x + workArea.width - 72),
+		y: clamp(ball.y, workArea.y, workArea.y + workArea.height - 72)
+	};
+}
+/** Collapsed origin on the work-area right edge, slightly below vertical center. */
+function defaultFloatingBallOrigin(workArea) {
+	const x = workArea.x + workArea.width - 72;
+	const y = workArea.y + (workArea.height - 72) / 2 + workArea.height * BELOW_CENTER;
+	return clampedBallOrigin({
+		x: Math.round(x),
+		y: Math.round(y)
+	}, workArea);
+}
+function overlayBoundsFromBall(ball, direction) {
+	return {
+		x: direction.horizontal === "left" ? ball.x - (PANEL_SIZE.width - 72) - 12 : ball.x - 12,
+		y: direction.vertical === "up" ? ball.y - (PANEL_SIZE.height - 72) - 12 : ball.y - 12,
+		width: PANEL_WINDOW_SIZE.width,
+		height: PANEL_WINDOW_SIZE.height
+	};
+}
+function expandedOverlayBounds(ball, workArea) {
+	const direction = expandDirection(ball, workArea);
+	const unclamped = overlayBoundsFromBall(ball, direction);
+	return {
+		x: clampWindowOrigin(unclamped.x, workArea.x, workArea.width, unclamped.width),
+		y: clampWindowOrigin(unclamped.y, workArea.y, workArea.height, unclamped.height),
+		width: unclamped.width,
+		height: unclamped.height,
+		...direction
+	};
+}
+function clampBallY(ballY, bounds) {
+	return clamp(Math.round(ballY), bounds.y, bounds.y + bounds.height - 72);
+}
+function offScreenBallOrigin(side, ballY, bounds) {
+	const y = clampBallY(ballY, bounds);
+	return {
+		x: side === "left" ? bounds.x - 72 - 2 : bounds.x + bounds.width + 2,
+		y
+	};
+}
+function insideBallOrigin(side, ballY, display) {
+	return {
+		x: side === "left" ? display.bounds.x + 5 : display.bounds.x + display.bounds.width - 72 - 5,
+		y: clamp(Math.round(ballY), display.workArea.y, display.workArea.y + display.workArea.height - 72)
+	};
+}
+function staysDocked(side, cursorX, bounds) {
+	if (side === "right") return cursorX >= bounds.x + bounds.width - DOCK_DRAG_OFF;
+	return cursorX <= bounds.x + DOCK_DRAG_OFF;
+}
+function easeInOutCubic(t) {
+	return t < .5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+}
+function easeOutCubic(t) {
+	return 1 - (1 - t) ** 3;
+}
+function lerpRect(start, end, t) {
+	return {
+		x: Math.round(start.x + (end.x - start.x) * t),
+		y: Math.round(start.y + (end.y - start.y) * t),
+		width: Math.round(start.width + (end.width - start.width) * t),
+		height: Math.round(start.height + (end.height - start.height) * t)
+	};
+}
+/** Initial collapsed window, including the transparent chrome around the ball. */
+function initialWindowBounds(workArea) {
+	return collapsedWindowBounds(defaultFloatingBallOrigin(workArea));
+}
+/**
+* Owns expand direction and dock state for one overlay window.
+* Dock is committed on pointer-up, not while the ball is still moving.
+*/
+var FloatingPlacement = class {
+	window;
+	displayAt;
+	direction = {
+		horizontal: "left",
+		vertical: "up"
+	};
+	docked;
+	anim = 0;
+	constructor(window, displayAt) {
+		this.window = window;
+		this.displayAt = displayAt;
+	}
+	/** Resize between the ball and the panel while keeping the ball origin fixed. */
+	setExpanded(expanded) {
+		const bounds = this.window.getBounds();
+		const display = this.displayAt(center(bounds));
+		if (expanded) {
+			const origin = this.currentBallOrigin(display.workArea);
+			this.docked = void 0;
+			const next = expandedOverlayBounds(origin, display.workArea);
+			this.direction = {
+				horizontal: next.horizontal,
+				vertical: next.vertical
+			};
+			this.window.setBounds({
+				x: next.x,
+				y: next.y,
+				width: next.width,
+				height: next.height
+			});
+			return {
+				expanded: true,
+				...this.direction,
+				docked: void 0
+			};
+		}
+		if (this.docked) {
+			this.applyTab(this.docked.side, this.docked.y, display.bounds);
+			return {
+				expanded: false,
+				...this.direction,
+				docked: this.docked.side
+			};
+		}
+		const origin = clampedBallOrigin(this.currentBallOrigin(display.workArea), display.workArea);
+		this.window.setBounds(collapsedWindowBounds(origin));
+		return {
+			expanded: false,
+			...this.direction,
+			docked: void 0
+		};
+	}
+	/**
+	* Move so the 72px ball origin follows `(x, y)`.
+	* A collapsed ball may hang past a display edge. Dock is committed by {@link clamp}.
+	*/
+	move(x, y, canDock = true) {
+		const origin = {
+			x: Math.round(x),
+			y: Math.round(y)
+		};
+		if (!isCollapsed(this.window.getBounds()) && this.docked === void 0) {
+			const direction = this.direction;
+			this.window.setBounds(overlayBoundsFromBall(origin, direction));
+			return { docked: void 0 };
+		}
+		if (!canDock) {
+			this.docked = void 0;
+			this.anim += 1;
+			this.window.setBounds(collapsedWindowBounds(origin));
+			return { docked: void 0 };
+		}
+		const display = this.displayAt(origin);
+		if (this.docked && staysDocked(this.docked.side, origin.x, display.bounds)) {
+			this.applyTab(this.docked.side, this.docked.y, display.bounds);
+			return { docked: this.docked.side };
+		}
+		this.docked = void 0;
+		this.anim += 1;
+		this.window.setBounds(collapsedWindowBounds(origin));
+		return { docked: void 0 };
+	}
+	/** Pull a free ball inside the work area, or dock it when it already overlaps a side edge. */
+	async clamp(canDock = true) {
+		const bounds = this.window.getBounds();
+		const display = this.displayAt(center(bounds));
+		if (this.docked) {
+			this.applyTab(this.docked.side, this.docked.y, display.bounds);
+			return { docked: this.docked.side };
+		}
+		if (isCollapsed(bounds)) {
+			const origin = {
+				x: bounds.x + 12,
+				y: bounds.y + 12
+			};
+			if (canDock) {
+				const side = dockSideForBallOrigin(origin, display.bounds);
+				if (side) return this.snap(side, origin.y, display.bounds);
+			}
+			this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)));
+			return { docked: void 0 };
+		}
+		this.setExpanded(true);
+		return { docked: void 0 };
+	}
+	/** Slide the ball back on screen from a docked tab. */
+	async unsnap() {
+		if (!this.docked) return { docked: void 0 };
+		const display = this.displayAt(center(this.window.getBounds()));
+		const start = offScreenBallOrigin(this.docked.side, this.docked.y, display.bounds);
+		const end = insideBallOrigin(this.docked.side, this.docked.y, display);
+		this.docked = void 0;
+		this.window.setBounds(collapsedWindowBounds(start));
+		await this.animate(collapsedWindowBounds(end), 300, easeOutCubic);
+		return { docked: void 0 };
+	}
+	currentBallOrigin(workArea) {
+		const bounds = this.window.getBounds();
+		if (this.docked) return insideBallOrigin(this.docked.side, this.docked.y, this.displayAt(center(bounds)));
+		if (isCollapsed(bounds)) return {
+			x: bounds.x + 12,
+			y: bounds.y + 12
+		};
+		return ballOriginFromWindow(bounds, this.direction);
+	}
+	applyTab(side, ballY, bounds) {
+		const y = clampBallY(ballY, bounds);
+		this.docked = {
+			side,
+			y
+		};
+		this.anim += 1;
+		this.window.setBounds(dockedTabBounds(side, y, bounds));
+	}
+	async snap(side, ballY, bounds) {
+		const y = clampBallY(ballY, bounds);
+		this.docked = {
+			side,
+			y
+		};
+		await this.animate(collapsedWindowBounds(offScreenBallOrigin(side, y, bounds)), 250, easeInOutCubic);
+		if (!this.docked || this.docked.side !== side) return { docked: this.docked?.side };
+		this.window.setBounds(dockedTabBounds(side, y, bounds));
+		return { docked: side };
+	}
+	animate(end, durationMs, ease) {
+		const generation = ++this.anim;
+		const start = this.window.getBounds();
+		if (durationMs <= 0) {
+			this.window.setBounds(end);
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => {
+			const t0 = Date.now();
+			const tick = () => {
+				if (generation !== this.anim) {
+					resolve();
+					return;
+				}
+				const t = Math.min(1, (Date.now() - t0) / durationMs);
+				this.window.setBounds(lerpRect(start, end, ease(t)));
+				if (t < 1) {
+					setTimeout(tick, 16);
+					return;
+				}
+				resolve();
+			};
+			setTimeout(tick, 16);
+		});
+	}
+};
+function center(bounds) {
+	return {
+		x: bounds.x + bounds.width / 2,
+		y: bounds.y + bounds.height / 2
+	};
+}
 //#endregion
 //#region src/main.ts
 /**
-* Minimal floating ball. The official dsh process owns the session; this process only draws and forwards one socket.
+* Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
 */
 const socketAddress = process.env.DSH_ORB_SOCKET ?? "";
 const token = process.env.DSH_ORB_TOKEN ?? "";
@@ -131,8 +329,8 @@ if (!socketAddress || !token) {
 }
 if (process.platform === "darwin") app.setActivationPolicy?.("accessory");
 let win;
+let placement;
 let live;
-let sessionId = null;
 let quitting = false;
 let buffer = "";
 app.on("before-quit", () => {
@@ -144,55 +342,73 @@ app.on("window-all-closed", () => {
 });
 app.whenReady().then(async () => {
 	if (process.platform === "darwin") app.dock?.hide();
-	const userData = app.getPath("userData");
-	await mkdir(userData, { recursive: true });
-	const pagePath = join(userData, "ball.html");
-	await writeFile(pagePath, ballHtml);
 	win = openWindow();
+	placement = new FloatingPlacement(win, (point) => {
+		const display = screen.getDisplayNearestPoint({
+			x: Math.round(point.x),
+			y: Math.round(point.y)
+		});
+		return {
+			bounds: display.bounds,
+			workArea: display.workArea
+		};
+	});
 	win.webContents.on("did-finish-load", () => {
 		if (win && !win.isVisible()) win.showInactive();
 	});
-	await win.loadFile(pagePath);
+	await win.loadFile(fileURLToPath(new URL("../assets/floating.html", import.meta.url)));
 	connect(0);
 });
-ipcMain.handle("orb:session", () => sessionId);
+ipcMain.handle("orb:expand", (_event, expanded) => {
+	if (!placement || typeof expanded !== "boolean") return {
+		expanded: false,
+		horizontal: "left",
+		vertical: "up",
+		docked: void 0
+	};
+	return placement.setExpanded(expanded);
+});
+ipcMain.handle("orb:move", (_event, request) => {
+	if (!placement || !isMove(request)) return { docked: void 0 };
+	return placement.move(request.x, request.y, request.canDock);
+});
+ipcMain.handle("orb:clamp", async (_event, canDock) => {
+	if (!placement) return { docked: void 0 };
+	return placement.clamp(canDock !== false);
+});
+ipcMain.handle("orb:unsnap", async () => {
+	if (!placement) return { docked: void 0 };
+	return placement.unsnap();
+});
 ipcMain.on("orb:prompt", (_event, text) => {
-	if (typeof text !== "string" || !live) return;
-	live.write(`${JSON.stringify({
+	write({
 		type: "prompt",
 		text
-	})}\n`);
+	});
 });
-ipcMain.on("orb:move-by", (_event, delta) => {
-	if (!win || !isDelta(delta)) return;
-	const [x, y] = win.getPosition();
-	win.setPosition(Math.round(x + delta.dx), Math.round(y + delta.dy));
+ipcMain.on("orb:question-answer", (_event, payload) => {
+	if (typeof payload !== "object" || payload === null) return;
+	const record = payload;
+	write({
+		type: "question-answer",
+		id: record.id,
+		answers: record.answers
+	});
 });
-ipcMain.on("orb:expand", (_event, expanded) => {
-	if (!win || typeof expanded !== "boolean") return;
-	const [x, y] = win.getPosition();
-	const [width, height] = win.getSize();
-	const right = x + width;
-	const bottom = y + height;
-	const nextWidth = expanded ? 340 : 72;
-	const nextHeight = expanded ? 480 : 72;
-	win.setBounds({
-		x: Math.round(right - nextWidth),
-		y: Math.round(bottom - nextHeight),
-		width: nextWidth,
-		height: nextHeight
+ipcMain.on("orb:question-cancel", (_event, id) => {
+	write({
+		type: "question-cancel",
+		id
 	});
 });
 function openWindow() {
-	const area = screen.getPrimaryDisplay().workArea;
-	const width = 72;
-	const height = 72;
+	const bounds = initialWindowBounds(screen.getPrimaryDisplay().workArea);
 	const created = new BrowserWindow({
 		title: "dsh-orb",
-		x: area.x + area.width - width,
-		y: area.y + Math.round((area.height - height) / 2),
-		width,
-		height,
+		x: bounds.x,
+		y: bounds.y,
+		width: bounds.width,
+		height: bounds.height,
 		frame: false,
 		transparent: true,
 		alwaysOnTop: true,
@@ -206,6 +422,7 @@ function openWindow() {
 		focusable: true,
 		show: false,
 		backgroundColor: "#00000000",
+		roundedCorners: false,
 		...process.platform === "darwin" ? { type: "panel" } : {},
 		webPreferences: {
 			preload: fileURLToPath(new URL("../preload.cjs", import.meta.url)),
@@ -216,7 +433,10 @@ function openWindow() {
 	});
 	created.setContentProtection(true);
 	created.setAlwaysOnTop(true, "screen-saver");
-	created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
+		visibleOnFullScreen: true,
+		skipTransformProcessType: true
+	});
 	created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 	created.webContents.on("will-navigate", (event) => {
 		event.preventDefault();
@@ -224,9 +444,8 @@ function openWindow() {
 	created.once("ready-to-show", () => {
 		created.showInactive();
 		created.setContentProtection(true);
-		const [x, y] = created.getPosition();
-		const [width, height] = created.getSize();
-		console.error(`dsh-orb helper: ball ${x},${y} ${width}x${height}`);
+		const shown = created.getBounds();
+		console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`);
 	});
 	return created;
 }
@@ -284,20 +503,40 @@ function connect(attempt) {
 function deliver(message) {
 	if (typeof message !== "object" || message === null || !win) return;
 	const record = message;
-	if (record.type === "session" && typeof record.sessionId === "string") {
-		sessionId = record.sessionId;
-		win.webContents.send("orb:session", sessionId);
+	if (record.type === "session") {
+		win.webContents.send("orb:session", record.sessionId);
 		return;
 	}
-	if (record.type === "line" && typeof record.role === "string" && typeof record.text === "string") win.webContents.send("orb:line", {
-		role: record.role,
-		text: record.text
-	});
+	if (record.type === "block") {
+		win.webContents.send("orb:block", message);
+		return;
+	}
+	if (record.type === "turn") {
+		win.webContents.send("orb:turn", message);
+		return;
+	}
+	if (record.type === "status") {
+		win.webContents.send("orb:status", record.text);
+		return;
+	}
+	if (record.type === "question") {
+		win.webContents.send("orb:question", message);
+		return;
+	}
+	if (record.type === "question-clear") {
+		win.webContents.send("orb:question-clear", record.id);
+		return;
+	}
+	if (record.type === "question-error") win.webContents.send("orb:question-error", message);
 }
-function isDelta(value) {
+function write(message) {
+	if (!live) return;
+	live.write(`${JSON.stringify(message)}\n`);
+}
+function isMove(value) {
 	if (typeof value !== "object" || value === null) return false;
-	const delta = value;
-	return typeof delta.dx === "number" && typeof delta.dy === "number" && Number.isFinite(delta.dx) && Number.isFinite(delta.dy) && Math.abs(delta.dx) <= 1e4 && Math.abs(delta.dy) <= 1e4;
+	const point = value;
+	return typeof point.x === "number" && typeof point.y === "number" && Number.isFinite(point.x) && Number.isFinite(point.y) && Math.abs(point.x) <= 1e5 && Math.abs(point.y) <= 1e5 && typeof point.canDock === "boolean";
 }
 //#endregion
 export {};

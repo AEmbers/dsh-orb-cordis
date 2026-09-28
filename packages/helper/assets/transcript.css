@@ -1,0 +1,101 @@
+#transcript {
+  --dsh-chat-content-width: 100%;
+}
+
+#question-pager[hidden] {
+  display: none !important;
+}
+
+#transcript [data-chat-turn-rail] {
+  display: none;
+}
+
+.block {
+  width: 100%;
+  min-width: 0;
+  color: var(--black);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.block[data-kind="user"] {
+  align-self: flex-end;
+  width: auto;
+  max-width: 100%;
+  padding: 8px 12px;
+  background: var(--input-bg);
+  border-radius: 14px;
+}
+
+.block[data-kind="tool"] {
+  color: var(--pin);
+  font-size: 12px;
+}
+
+.block[data-variant="think"] .think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pin);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.think-mark {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pin);
+}
+
+.block[data-state="running"] .think-mark {
+  animation: think-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes think-pulse {
+  50% { opacity: 0.35; }
+}
+
+.think-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.think-body {
+  display: none;
+  margin: 6px 0 0 16px;
+  color: var(--pin);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.block[data-expanded] .think-body {
+  display: block;
+}
+
+.block-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.block code {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--input-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.block strong {
+  font-weight: 600;
+}

@@ -43,12 +43,47 @@ export interface OrbContext {
     } | undefined
   }
   effect(execute: () => void | (() => void)): void
+  on(
+    name: 'user-questions/request',
+    listener: (
+      request: QuestionRequest,
+      next: () => Promise<QuestionAnswer>,
+    ) => Promise<QuestionAnswer>,
+    options?: { readonly prepend?: boolean },
+  ): (() => void) | void
 }
 
-interface LineMessage {
-  readonly type: 'line'
-  readonly role: 'user' | 'assistant' | 'tool' | 'status'
+interface QuestionRequest {
+  readonly questions?: unknown
+  readonly agent?: { readonly id?: unknown }
+  readonly signal?: AbortSignal
+}
+
+interface QuestionAnswer {
+  readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[]
+}
+
+interface BlockMessage {
+  readonly type: 'block'
+  readonly key: string
+  readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool'
   readonly text: string
+  readonly running: boolean
+}
+
+interface PendingQuestion {
+  readonly id: string
+  readonly resolve: (answer: QuestionAnswer) => void
+  readonly reject: (error: Error) => void
+}
+
+interface ShownQuestion {
+  readonly id: string
+  readonly question: string
+  readonly detail?: string
+  readonly header?: string
+  readonly options?: readonly { readonly label: string; readonly description?: string }[]
+  readonly multiSelect?: true
 }
 
 /** One host lifetime of the ball: socket, helper process, and one Computer Use session. */
@@ -59,7 +94,11 @@ export class OrbRuntime {
   private port = 0
   private readonly sockets = new Set<Socket>()
   private readonly buffers = new Map<Socket, string>()
-  private readonly lines: LineMessage[] = []
+  private readonly blocks = new Map<string, BlockMessage>()
+  private readonly blockOrder: string[] = []
+  private pending: PendingQuestion | undefined
+  private questionBody: readonly ShownQuestion[] | undefined
+  private turnRunning = false
   private child: ChildProcess | undefined
   private binary = ''
   private failures = 0
@@ -100,10 +139,26 @@ export class OrbRuntime {
   stop(): void {
     this.stopped = true
     this.stopWatch()
+    this.failQuestion('ask_user_question was aborted before the user answered', 'ASK_ABORTED')
     this.server?.close()
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     this.killChild()
+  }
+
+  /** Claim questions for this orb session. Register this while the plugin fiber is active. */
+  attachQuestions(): () => void {
+    try {
+      const dispose = this.ctx.on(
+        'user-questions/request',
+        (request, next) => this.onQuestion(request, next),
+        { prepend: true },
+      )
+      return typeof dispose === 'function' ? dispose : () => {}
+    } catch (error) {
+      console.error(`dsh-orb: question listener failed: ${error instanceof Error ? error.message : String(error)}`)
+      return () => {}
+    }
   }
 
   private async listen(): Promise<void> {
@@ -155,11 +210,14 @@ export class OrbRuntime {
           continue
         }
         if (isPrompt(message)) void this.onPrompt(message.text)
+        else if (isQuestionAnswer(message)) this.onQuestionAnswer(message.id, message.answers)
+        else if (isQuestionCancel(message)) this.onQuestionCancel(message.id)
       }
     })
     socket.on('close', () => {
       this.sockets.delete(socket)
       this.buffers.delete(socket)
+      if (this.sockets.size === 0) this.failQuestion('the floating ball closed before the user answered', 'ASK_ABORTED')
     })
     socket.on('error', () => {
       socket.destroy()
@@ -178,18 +236,26 @@ export class OrbRuntime {
   private accept(socket: Socket): void {
     this.sockets.add(socket)
     if (this.sessionId) this.send(socket, { type: 'session', sessionId: this.sessionId })
-    for (const line of this.lines) this.send(socket, line)
+    for (const key of this.blockOrder) {
+      const block = this.blocks.get(key)
+      if (block) this.send(socket, block)
+    }
+    this.send(socket, { type: 'turn', running: this.turnRunning })
+    if (this.pending) this.send(socket, this.questionPayload(this.pending.id))
   }
 
   private async onPrompt(text: string): Promise<void> {
     const trimmed = text.trim()
     if (!trimmed) return
-    this.line('user', trimmed)
+    this.block(`user:${randomUUID()}`, 'user', trimmed, false, 'set')
+    this.turnRunning = true
+    this.broadcast({ type: 'turn', running: true })
     if (this.sessionError && !this.sessionId) {
-      this.line('status', this.sessionError)
+      this.turnRunning = false
+      this.broadcast({ type: 'turn', running: false })
+      this.status(this.sessionError)
       return
     }
-    this.line('status', '正在执行')
     try {
       const sessionId = await this.ensureSession()
       if (!this.timer) this.syncWatermark()
@@ -203,10 +269,10 @@ export class OrbRuntime {
       }, new AbortController().signal)
       this.drain()
     } catch (error) {
-      this.stopWatch()
+      this.finishTurn()
       const message = error instanceof Error ? error.message : String(error)
       console.error(`dsh-orb: prompt failed: ${message}`)
-      this.line('status', message)
+      this.status(message)
     }
   }
 
@@ -271,8 +337,12 @@ export class OrbRuntime {
     if (!this.timer) this.timer = setInterval(() => this.drain(), 400)
     if (this.giveUp) clearTimeout(this.giveUp)
     this.giveUp = setTimeout(() => {
-      this.line('status', '等待超时')
-      this.stopWatch()
+      if (this.pending) {
+        this.watch()
+        return
+      }
+      this.status('等待超时')
+      this.finishTurn()
     }, 180_000)
   }
 
@@ -299,35 +369,227 @@ export class OrbRuntime {
         const seq = Number(event.seq)
         if (seq <= this.watermark) continue
         this.watermark = seq
-        this.consume(event.type, event.data)
+        this.consume(event.type, event.data, seq)
       }
     } catch (error) {
       console.error(`dsh-orb: transcript read failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  private consume(type: string, data: unknown): void {
-    if (type === 'tool/call') {
-      const name = toolName(data)
-      if (name) this.line('tool', name)
+  private consume(type: string, data: unknown, seq: number): void {
+    if (type === 'assistant/chunk') {
+      this.onChunk(data)
       return
     }
     if (type === 'assistant/message') {
-      const text = assistantText(data)
-      if (text) this.line('assistant', text)
+      this.onAssistant(data)
       return
     }
-    if (type === 'turn/end') {
-      this.line('status', '完成')
-      this.stopWatch()
+    if (type === 'tool/call') {
+      const name = toolName(data)
+      if (!name) return
+      const id = callId(data)
+      const existing = id ? undefined : this.runningTool(name)
+      this.block(id ? `tool:${id}` : existing ?? `tool:${seq}`, 'tool', name, false, 'set')
+      return
     }
+    if (type === 'turn/end') this.finishTurn()
   }
 
-  private line(role: LineMessage['role'], text: string): void {
-    const message: LineMessage = { type: 'line', role, text: clip(text) }
-    this.lines.push(message)
-    if (this.lines.length > 200) this.lines.shift()
+  private onChunk(data: unknown): void {
+    const record = asRecord(data)
+    const chunk = asRecord(record?.chunk)
+    if (!record || !chunk) return
+    const turn = numberOf(record.turn)
+    const step = numberOf(record.step)
+    const index = numberOf(chunk.index)
+    const key = `b:${turn}:${step}:${index}`
+    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+      this.block(key, 'assistant', chunk.text, true, 'append')
+      return
+    }
+    if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
+      this.block(key, 'reasoning', chunk.text, true, 'append')
+      return
+    }
+    if (chunk.type === 'tool-call-delta') {
+      const name = typeof chunk.name === 'string' ? chunk.name : ''
+      if (!name) return
+      const id = typeof chunk.id === 'string' ? chunk.id : ''
+      this.block(id ? `tool:${id}` : key, 'tool', name, true, 'set')
+      return
+    }
+    if (chunk.type === 'block-end') this.applyContent(key, chunk.block, turn, step, index, false)
+  }
+
+  private onAssistant(data: unknown): void {
+    const record = asRecord(data)
+    if (!record) return
+    const turn = numberOf(record.turn)
+    const step = numberOf(record.step)
+    if (Array.isArray(record.stream)) {
+      for (const item of record.stream) this.foldStream(item, turn, step)
+    }
+    const message = asRecord(record.message)
+    const content = message?.content
+    if (typeof content === 'string') {
+      this.block(`b:${turn}:${step}:0`, 'assistant', content, false, 'set')
+      return
+    }
+    if (!Array.isArray(content)) return
+    content.forEach((part, index) => {
+      this.applyContent(`b:${turn}:${step}:${index}`, part, turn, step, index, false)
+    })
+  }
+
+  private foldStream(item: unknown, turn: number, step: number): void {
+    const record = asRecord(item)
+    if (!record) return
+    if (record.type === 'chunk') {
+      this.onChunk({ turn, step, chunk: record.chunk })
+      return
+    }
+    const index = numberOf(record.index)
+    if (record.type === 'text-chunks' || record.type === 'reasoning-chunks') {
+      const texts = Array.isArray(record.texts) ? record.texts.filter((part): part is string => typeof part === 'string').join('') : ''
+      if (!texts.trim()) return
+      this.block(`b:${turn}:${step}:${index}`, record.type === 'reasoning-chunks' ? 'reasoning' : 'assistant', texts, false, 'set')
+      return
+    }
+    if (record.type !== 'tool-call-chunks') return
+    const name = typeof record.name === 'string' ? record.name : ''
+    if (!name || this.hasTool(name)) return
+    const id = typeof record.id === 'string' ? record.id : ''
+    this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, false, 'set')
+  }
+
+  private applyContent(key: string, part: unknown, turn: number, step: number, index: number, running: boolean): void {
+    const block = asRecord(part)
+    if (!block) return
+    if ((block.type === 'text' || block.type === 'reasoning' || block.type === 'thinking') && typeof block.text === 'string') {
+      if (!block.text.trim()) return
+      const kind = block.type === 'text' ? 'assistant' : 'reasoning'
+      this.block(key, kind, block.text, running, 'set')
+      return
+    }
+    if (block.type !== 'tool-call' && block.type !== 'tool_use') return
+    const name = typeof block.name === 'string' ? block.name : ''
+    if (!name || this.hasTool(name)) return
+    const id = typeof block.id === 'string' ? block.id : typeof block.callId === 'string' ? block.callId : ''
+    this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, running, 'set')
+  }
+
+  private hasTool(name: string): boolean {
+    for (const block of this.blocks.values()) {
+      if (block.kind === 'tool' && block.text === name) return true
+    }
+    return false
+  }
+
+  private runningTool(name: string): string | undefined {
+    for (const key of this.blockOrder) {
+      const block = this.blocks.get(key)
+      if (block?.kind === 'tool' && block.text === name && block.running) return key
+    }
+    return undefined
+  }
+
+  private finishTurn(): void {
+    this.turnRunning = false
+    for (const key of [...this.blockOrder]) {
+      const item = this.blocks.get(key)
+      if (item?.running) this.block(key, item.kind, item.text, false, 'set')
+    }
+    this.broadcast({ type: 'turn', running: false })
+    this.stopWatch()
+    const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === 'assistant')
+    console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`)
+  }
+
+  private block(
+    key: string,
+    kind: BlockMessage['kind'],
+    text: string,
+    running: boolean,
+    mode: 'set' | 'append',
+  ): void {
+    const previous = this.blocks.get(key)?.text ?? ''
+    const next = clip(mode === 'append' ? `${previous}${text}` : text, 20_000)
+    if (!next.trim()) return
+    const message: BlockMessage = { type: 'block', key, kind, text: next, running }
+    if (!this.blocks.has(key)) {
+      this.blockOrder.push(key)
+      while (this.blockOrder.length > 200) {
+        const dropped = this.blockOrder.shift()
+        if (dropped) this.blocks.delete(dropped)
+      }
+    }
+    this.blocks.set(key, message)
     this.broadcast(message)
+  }
+
+  private status(text: string): void {
+    this.broadcast({ type: 'status', text: clip(text, 500) })
+  }
+
+  private onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>): Promise<QuestionAnswer> {
+    const agentId = typeof request.agent?.id === 'string' ? request.agent.id : ''
+    const questions = sanitizeQuestions(request.questions)
+    if (this.sockets.size === 0 || !this.sessionId || agentId !== this.sessionId || this.pending || questions.length === 0) {
+      if (this.sessionId && agentId === this.sessionId) {
+        console.error(`dsh-orb: question deferred sockets=${this.sockets.size} pending=${this.pending !== undefined} count=${questions.length}`)
+      }
+      return next()
+    }
+    console.error(`dsh-orb: question card ${questions.length}`)
+    const id = randomUUID()
+    return new Promise((resolve, reject) => {
+      this.pending = { id, resolve, reject }
+      this.questionBody = questions
+      this.broadcast(this.questionPayload(id))
+      const signal = request.signal
+      const onAbort = () => {
+        this.failQuestion('ask_user_question was aborted before the user answered', 'ASK_ABORTED', id)
+      }
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  private onQuestionAnswer(id: string, answers: unknown): void {
+    const pending = this.pending
+    if (!pending || pending.id !== id) return
+    const parsed = parseAnswers(answers)
+    if (!parsed) {
+      this.broadcast({ type: 'question-error', id, text: '答案无效' })
+      return
+    }
+    this.pending = undefined
+    this.questionBody = undefined
+    this.broadcast({ type: 'question-clear', id })
+    console.error('dsh-orb: question answered')
+    pending.resolve(parsed)
+  }
+
+  private onQuestionCancel(id: string): void {
+    this.failQuestion('the user cancelled ask_user_question', 'ASK_CANCELLED', id)
+  }
+
+  private failQuestion(message: string, code: string, id = this.pending?.id): void {
+    const pending = this.pending
+    if (!pending || pending.id !== id) return
+    this.pending = undefined
+    this.questionBody = undefined
+    this.broadcast({ type: 'question-clear', id })
+    console.error(`dsh-orb: question ${code}`)
+    pending.reject(questionError(message, code))
+  }
+
+  private questionPayload(id: string): { type: 'question'; id: string; questions: readonly ShownQuestion[] } {
+    return { type: 'question', id, questions: this.questionBody ?? [] }
   }
 
   private broadcast(message: unknown): void {
@@ -431,24 +693,98 @@ function toolName(data: unknown): string {
   return typeof name === 'string' ? name : ''
 }
 
-function assistantText(data: unknown): string {
-  if (typeof data !== 'object' || data === null) return ''
-  const message = (data as { message?: { content?: unknown } }).message
-  return textFromContent(message?.content)
+function isQuestionAnswer(message: unknown): message is { type: 'question-answer'; id: string; answers: unknown } {
+  if (typeof message !== 'object' || message === null) return false
+  const record = message as { type?: unknown; id?: unknown }
+  return record.type === 'question-answer' && typeof record.id === 'string'
 }
 
-function textFromContent(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.map((part) => {
-    if (typeof part === 'string') return part
-    if (typeof part !== 'object' || part === null) return ''
-    const record = part as { type?: unknown; text?: unknown }
-    return record.type === 'text' && typeof record.text === 'string' ? record.text : ''
-  }).filter(Boolean).join('\n')
+function isQuestionCancel(message: unknown): message is { type: 'question-cancel'; id: string } {
+  if (typeof message !== 'object' || message === null) return false
+  const record = message as { type?: unknown; id?: unknown }
+  return record.type === 'question-cancel' && typeof record.id === 'string'
 }
 
-function clip(text: string): string {
-  const trimmed = text.trim()
-  return trimmed.length <= 4000 ? trimmed : trimmed.slice(0, 4000)
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function numberOf(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function callId(data: unknown): string {
+  const record = asRecord(data)
+  if (!record) return ''
+  if (typeof record.id === 'string') return record.id
+  if (typeof record.callId === 'string') return record.callId
+  if (typeof record.toolCallId === 'string') return record.toolCallId
+  const call = asRecord(record.call)
+  return typeof call?.id === 'string' ? call.id : ''
+}
+
+function bounded(value: unknown, max: number): string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max ? value : ''
+}
+
+function sanitizeQuestions(value: unknown): ShownQuestion[] {
+  if (!Array.isArray(value)) return []
+  const questions: ShownQuestion[] = []
+  for (const item of value.slice(0, 20)) {
+    const record = asRecord(item)
+    if (!record) continue
+    const id = bounded(record.id, 200)
+    const question = bounded(record.question, 4000)
+    if (!id || !question) continue
+    const options: { label: string; description?: string }[] = []
+    if (Array.isArray(record.options)) {
+      for (const option of record.options.slice(0, 20)) {
+        const entry = asRecord(option)
+        const label = entry ? bounded(entry.label, 500) : ''
+        if (!label) continue
+        const description = entry ? bounded(entry.description, 2000) : ''
+        options.push(description ? { label, description } : { label })
+      }
+    }
+    const detail = bounded(record.detail, 8000)
+    const header = bounded(record.header, 200)
+    questions.push({
+      id,
+      question,
+      ...detail ? { detail } : {},
+      ...header ? { header } : {},
+      ...options.length > 0 ? { options } : {},
+      ...record.multiSelect === true ? { multiSelect: true as const } : {},
+    })
+  }
+  return questions
+}
+
+function parseAnswers(value: unknown): QuestionAnswer | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) return undefined
+  const answers: { id: string; selected: string[]; custom?: string }[] = []
+  for (const item of value) {
+    const record = asRecord(item)
+    if (!record || typeof record.id !== 'string' || record.id.length > 200) return undefined
+    if (!Array.isArray(record.selected) || record.selected.length > 20) return undefined
+    const selected: string[] = []
+    for (const label of record.selected) {
+      if (typeof label !== 'string' || label.length > 4000) return undefined
+      selected.push(label)
+    }
+    if (record.custom !== undefined && (typeof record.custom !== 'string' || record.custom.length > 4000)) return undefined
+    const custom = typeof record.custom === 'string' ? record.custom : ''
+    answers.push({ id: record.id, selected, ...custom ? { custom } : {} })
+  }
+  return { answers }
+}
+
+function questionError(message: string, code: string): Error {
+  const error = new Error(message)
+  error.name = 'UserQuestionError'
+  return Object.assign(error, { code })
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(0, max)
 }

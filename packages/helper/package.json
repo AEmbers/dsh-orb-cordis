@@ -12,7 +12,8 @@
   },
   "files": [
     "lib",
-    "preload.cjs"
+    "preload.cjs",
+    "assets"
   ],
   "scripts": {
     "build": "tsdown"

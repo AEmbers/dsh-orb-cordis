@@ -51,6 +51,23 @@ interface OrbContext {
     } | undefined;
   };
   effect(execute: () => void | (() => void)): void;
+  on(name: 'user-questions/request', listener: (request: QuestionRequest, next: () => Promise<QuestionAnswer>) => Promise<QuestionAnswer>, options?: {
+    readonly prepend?: boolean;
+  }): (() => void) | void;
+}
+interface QuestionRequest {
+  readonly questions?: unknown;
+  readonly agent?: {
+    readonly id?: unknown;
+  };
+  readonly signal?: AbortSignal;
+}
+interface QuestionAnswer {
+  readonly answers: readonly {
+    readonly id: string;
+    readonly selected: readonly string[];
+    readonly custom?: string;
+  }[];
 }
 //#endregion
 //#region src/index.d.ts

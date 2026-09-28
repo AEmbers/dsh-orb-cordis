@@ -7,6 +7,7 @@ declare module 'electron' {
   }
 
   interface Display {
+    bounds: Rectangle
     workArea: Rectangle
   }
 
@@ -20,11 +21,9 @@ declare module 'electron' {
     loadFile(path: string): Promise<void>
     setContentProtection(enable: boolean): void
     setAlwaysOnTop(flag: boolean, level?: string): void
-    setVisibleOnAllWorkspaces(flag: boolean, options?: { visibleOnFullScreen?: boolean }): void
+    setVisibleOnAllWorkspaces(flag: boolean, options?: { visibleOnFullScreen?: boolean; skipTransformProcessType?: boolean }): void
     setBounds(bounds: Rectangle): void
-    setPosition(x: number, y: number): void
-    getPosition(): [number, number]
-    getSize(): [number, number]
+    getBounds(): Rectangle
     isVisible(): boolean
     showInactive(): void
     once(event: 'ready-to-show', listener: () => void): void
@@ -50,6 +49,7 @@ declare module 'electron' {
     focusable?: boolean
     show?: boolean
     backgroundColor?: string
+    roundedCorners?: boolean
     type?: string
     webPreferences?: {
       preload?: string
@@ -65,7 +65,6 @@ declare module 'electron' {
     whenReady(): Promise<void>
     quit(): void
     exit(code: number): void
-    getPath(name: 'userData'): string
     setActivationPolicy?(policy: 'accessory'): void
     dock?: { hide(): void }
     on(event: 'before-quit' | 'window-all-closed', listener: () => void): void
@@ -73,10 +72,11 @@ declare module 'electron' {
 
   export const screen: {
     getPrimaryDisplay(): Display
+    getDisplayNearestPoint(point: { x: number; y: number }): Display
   }
 
   export const ipcMain: {
     on(channel: string, listener: (event: unknown, ...args: unknown[]) => void): void
-    handle(channel: string, listener: () => unknown): void
+    handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void
   }
 }

@@ -29,10 +29,12 @@ export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): vo
   if (process.platform === 'linux' || config.autoStart === false) return
   const runtime = new OrbRuntime(ctx)
   ctx.effect(() => {
+    const detach = runtime.attachQuestions()
     void runtime.start().catch((error: unknown) => {
       console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`)
     })
     return () => {
+      detach()
       runtime.stop()
     }
   })

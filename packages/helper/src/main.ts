@@ -1,13 +1,11 @@
 /**
- * Minimal floating ball. The official dsh process owns the session; this process only draws and forwards one socket.
+ * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
  */
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron'
-import { mkdir, writeFile } from 'node:fs/promises'
 import { createConnection, type Socket } from 'node:net'
-import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ballHtml } from './page.ts'
+import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
 
 const socketAddress = process.env.DSH_ORB_SOCKET ?? ''
 const token = process.env.DSH_ORB_TOKEN ?? ''
@@ -22,8 +20,8 @@ if (!socketAddress || !token) {
 if (process.platform === 'darwin') app.setActivationPolicy?.('accessory')
 
 let win: BrowserWindow | undefined
+let placement: FloatingPlacement | undefined
 let live: Socket | undefined
-let sessionId: string | null = null
 let quitting = false
 let buffer = ''
 
@@ -37,57 +35,60 @@ app.on('window-all-closed', () => {
 
 void app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide()
-  const userData = app.getPath('userData')
-  await mkdir(userData, { recursive: true })
-  const pagePath = join(userData, 'ball.html')
-  await writeFile(pagePath, ballHtml)
   win = openWindow()
+  placement = new FloatingPlacement(win, (point) => {
+    const display = screen.getDisplayNearestPoint({ x: Math.round(point.x), y: Math.round(point.y) })
+    return { bounds: display.bounds, workArea: display.workArea }
+  })
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isVisible()) win.showInactive()
   })
-  await win.loadFile(pagePath)
+  await win.loadFile(fileURLToPath(new URL('../assets/floating.html', import.meta.url)))
   connect(0)
 })
 
-ipcMain.handle('orb:session', () => sessionId)
+ipcMain.handle('orb:expand', (_event, expanded) => {
+  if (!placement || typeof expanded !== 'boolean') return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined }
+  return placement.setExpanded(expanded)
+})
+
+ipcMain.handle('orb:move', (_event, request) => {
+  if (!placement || !isMove(request)) return { docked: undefined }
+  return placement.move(request.x, request.y, request.canDock)
+})
+
+ipcMain.handle('orb:clamp', async (_event, canDock) => {
+  if (!placement) return { docked: undefined }
+  return placement.clamp(canDock !== false)
+})
+
+ipcMain.handle('orb:unsnap', async () => {
+  if (!placement) return { docked: undefined }
+  return placement.unsnap()
+})
 
 ipcMain.on('orb:prompt', (_event, text) => {
-  if (typeof text !== 'string' || !live) return
-  live.write(`${JSON.stringify({ type: 'prompt', text })}\n`)
+  write({ type: 'prompt', text })
 })
 
-ipcMain.on('orb:move-by', (_event, delta) => {
-  if (!win || !isDelta(delta)) return
-  const [x, y] = win.getPosition()
-  win.setPosition(Math.round(x + delta.dx), Math.round(y + delta.dy))
+ipcMain.on('orb:question-answer', (_event, payload) => {
+  if (typeof payload !== 'object' || payload === null) return
+  const record = payload as { id?: unknown; answers?: unknown }
+  write({ type: 'question-answer', id: record.id, answers: record.answers })
 })
 
-ipcMain.on('orb:expand', (_event, expanded) => {
-  if (!win || typeof expanded !== 'boolean') return
-  const [x, y] = win.getPosition()
-  const [width, height] = win.getSize()
-  const right = x + width
-  const bottom = y + height
-  const nextWidth = expanded ? 340 : 72
-  const nextHeight = expanded ? 480 : 72
-  win.setBounds({
-    x: Math.round(right - nextWidth),
-    y: Math.round(bottom - nextHeight),
-    width: nextWidth,
-    height: nextHeight,
-  })
+ipcMain.on('orb:question-cancel', (_event, id) => {
+  write({ type: 'question-cancel', id })
 })
 
 function openWindow(): BrowserWindow {
-  const area = screen.getPrimaryDisplay().workArea
-  const width = 72
-  const height = 72
+  const bounds = initialWindowBounds(screen.getPrimaryDisplay().workArea)
   const created = new BrowserWindow({
     title: 'dsh-orb',
-    x: area.x + area.width - width,
-    y: area.y + Math.round((area.height - height) / 2),
-    width,
-    height,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -101,6 +102,7 @@ function openWindow(): BrowserWindow {
     focusable: true,
     show: false,
     backgroundColor: '#00000000',
+    roundedCorners: false,
     ...process.platform === 'darwin' ? { type: 'panel' } : {},
     webPreferences: {
       preload: fileURLToPath(new URL('../preload.cjs', import.meta.url)),
@@ -111,7 +113,9 @@ function openWindow(): BrowserWindow {
   })
   created.setContentProtection(true)
   created.setAlwaysOnTop(true, 'screen-saver')
-  created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  if (process.platform === 'darwin') {
+    created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+  }
   created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   created.webContents.on('will-navigate', (event) => {
     event.preventDefault()
@@ -119,9 +123,8 @@ function openWindow(): BrowserWindow {
   created.once('ready-to-show', () => {
     created.showInactive()
     created.setContentProtection(true)
-    const [x, y] = created.getPosition()
-    const [width, height] = created.getSize()
-    console.error(`dsh-orb helper: ball ${x},${y} ${width}x${height}`)
+    const shown = created.getBounds()
+    console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`)
   })
   return created
 }
@@ -176,21 +179,46 @@ function connect(attempt: number): void {
 
 function deliver(message: unknown): void {
   if (typeof message !== 'object' || message === null || !win) return
-  const record = message as { type?: unknown; sessionId?: unknown; role?: unknown; text?: unknown }
-  if (record.type === 'session' && typeof record.sessionId === 'string') {
-    sessionId = record.sessionId
-    win.webContents.send('orb:session', sessionId)
+  const record = message as { type?: unknown }
+  if (record.type === 'session') {
+    win.webContents.send('orb:session', (record as { sessionId?: unknown }).sessionId)
     return
   }
-  if (record.type === 'line' && typeof record.role === 'string' && typeof record.text === 'string') {
-    win.webContents.send('orb:line', { role: record.role, text: record.text })
+  if (record.type === 'block') {
+    win.webContents.send('orb:block', message)
+    return
+  }
+  if (record.type === 'turn') {
+    win.webContents.send('orb:turn', message)
+    return
+  }
+  if (record.type === 'status') {
+    win.webContents.send('orb:status', (record as { text?: unknown }).text)
+    return
+  }
+  if (record.type === 'question') {
+    win.webContents.send('orb:question', message)
+    return
+  }
+  if (record.type === 'question-clear') {
+    win.webContents.send('orb:question-clear', (record as { id?: unknown }).id)
+    return
+  }
+  if (record.type === 'question-error') {
+    win.webContents.send('orb:question-error', message)
   }
 }
 
-function isDelta(value: unknown): value is { dx: number; dy: number } {
+function write(message: unknown): void {
+  if (!live) return
+  live.write(`${JSON.stringify(message)}\n`)
+}
+
+function isMove(value: unknown): value is { x: number; y: number; canDock: boolean } {
   if (typeof value !== 'object' || value === null) return false
-  const delta = value as { dx?: unknown; dy?: unknown }
-  return typeof delta.dx === 'number' && typeof delta.dy === 'number'
-    && Number.isFinite(delta.dx) && Number.isFinite(delta.dy)
-    && Math.abs(delta.dx) <= 10_000 && Math.abs(delta.dy) <= 10_000
+  const point = value as { x?: unknown; y?: unknown; canDock?: unknown }
+  return typeof point.x === 'number' && typeof point.y === 'number'
+    && Number.isFinite(point.x) && Number.isFinite(point.y)
+    && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
+    && typeof point.canDock === 'boolean'
 }
