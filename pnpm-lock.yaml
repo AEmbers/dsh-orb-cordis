@@ -17,6 +17,9 @@ importers:
 
   packages/bundle:
     dependencies:
+      '@dsh-orb/computer-use':
+        specifier: file:../computer-use
+        version: link:../computer-use
       '@dsh-orb/host':
         specifier: file:../host
         version: link:../host
@@ -70,13 +73,17 @@ importers:
         specifier: 3.18.4
         version: 3.18.4
 
-  packages/computer-use-bundle:
-    dependencies:
-      '@dsh-orb/computer-use':
-        specifier: file:../computer-use
-        version: link:../computer-use
+  packages/helper: {}
 
-  packages/host: {}
+  packages/host:
+    dependencies:
+      '@dsh-orb/helper':
+        specifier: file:../helper
+        version: link:../helper
+    devDependencies:
+      '@deepseek-ai/dsh-home-paths':
+        specifier: 0.1.7-rc.2
+        version: 0.1.7-rc.2(@deepseek-ai/cordis@4.0.4)
 
 packages:
 

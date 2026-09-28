@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-orb/helper",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Transparent always-on-top ball. A separate Electron process owned by the official dsh host.",
+  "main": "lib/main.js",
+  "exports": {
+    ".": "./lib/main.js",
+    "./package.json": "./package.json",
+    "./preload.cjs": "./preload.cjs"
+  },
+  "files": [
+    "lib",
+    "preload.cjs"
+  ],
+  "scripts": {
+    "build": "tsdown"
+  },
+  "license": "MIT"
+}

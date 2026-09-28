@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Installable Orb bundle. Stage 0 inserts an empty host plugin.",
+  "description": "Installable Orb bundle. Inserts the Computer Use preset and the floating-ball host.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
@@ -24,6 +24,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@dsh-orb/computer-use": "file:../computer-use",
     "@dsh-orb/host": "file:../host"
   },
   "dsh": {

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Host-side Orb plugin. Stage 0 exports an empty apply.",
+  "description": "Host-side Orb plugin. Starts the floating-ball helper and owns its Computer Use session.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
@@ -14,11 +14,19 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/index.js",
-    "lib/index.d.ts"
+    "lib"
   ],
   "scripts": {
     "build": "tsdown"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@dsh-orb/helper": "file:../helper"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2"
+  }
 }
