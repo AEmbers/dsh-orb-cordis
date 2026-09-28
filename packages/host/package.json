@@ -24,7 +24,7 @@
     "@dsh-orb/helper": "file:../helper"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2"
+    "@deepseek-ai/dsh-home-paths": ">=0.1.7-rc.2 <0.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-home-paths": "0.1.7-rc.2"
