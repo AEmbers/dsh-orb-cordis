@@ -1454,6 +1454,8 @@ var OrbRuntime = class {
 	stepBlocks = /* @__PURE__ */ new Map();
 	liveStep;
 	orphanFrameLogged = false;
+	/** Keys of the newest settled assistant message: the turn's final answer so far. */
+	responseKeys = [];
 	helperPid;
 	overlayWaiters = /* @__PURE__ */ new Map();
 	tcc;
@@ -2048,6 +2050,12 @@ var OrbRuntime = class {
 		const turn = numberOf(record.turn);
 		const step = numberOf(record.step);
 		if (record.interrupted === true) this.turnInterrupted = true;
+		const previous = this.responseKeys;
+		this.responseKeys = [];
+		for (const key of previous) {
+			const item = this.blocks.get(key);
+			if (item?.response === true) this.block(key, item.kind, item.text, false, "set");
+		}
 		const content = asRecord(record.message)?.content;
 		const parts = typeof content === "string" ? [{
 			type: "text",
@@ -2055,6 +2063,7 @@ var OrbRuntime = class {
 		}] : Array.isArray(content) ? content : [];
 		const transient = this.stepBlocks.get(`${turn}:${step}`) ?? [];
 		this.stepBlocks.delete(`${turn}:${step}`);
+		const writtenKeys = [];
 		let cursor = 0;
 		for (const [index, part] of parts.entries()) {
 			const wanted = partKind(asRecord(part));
@@ -2069,12 +2078,15 @@ var OrbRuntime = class {
 				this.dropBlock(candidate);
 			}
 			key ??= `b:${turn}:${step}:${index}`;
-			if (this.applyContent(key, part, false) !== key) this.dropBlock(key);
+			const written = this.applyContent(key, part, false);
+			if (written === void 0 || written !== key) this.dropBlock(key);
+			if (written !== void 0) writtenKeys.push(written);
 		}
 		while (cursor < transient.length) {
 			this.dropBlock(transient[cursor]);
 			cursor += 1;
 		}
+		this.responseKeys = writtenKeys;
 	}
 	/** Remove one block everywhere: map, order, and the ball's DOM. */
 	dropBlock(key) {
@@ -2118,6 +2130,11 @@ var OrbRuntime = class {
 		for (const key of [...this.blockOrder]) if (this.blocks.get(key)?.running) this.settleBlock(key);
 		this.stepBlocks.clear();
 		this.lastAttemptByStep.clear();
+		for (const key of [...this.responseKeys]) {
+			const item = this.blocks.get(key);
+			if (item) this.block(key, item.kind, item.text, false, "set");
+		}
+		this.responseKeys = [];
 		this.broadcast({
 			type: "turn",
 			running: false,
@@ -2165,6 +2182,7 @@ var OrbRuntime = class {
 			text: next,
 			running,
 			...this.turnInterrupted && kind === "assistant" && !running ? { interrupted: true } : {},
+			...this.responseKeys.includes(key) ? { response: true } : {},
 			...merged === void 0 ? {} : { detail: merged }
 		};
 		if (!this.blocks.has(key)) {
@@ -2622,6 +2640,7 @@ var OrbRuntime = class {
 		this.lastAttemptByStep.clear();
 		this.stepBlocks.clear();
 		this.liveStep = void 0;
+		this.responseKeys = [];
 		this.clearDirty();
 		this.selection.setSessionRunning(false);
 		this.stopWatch();

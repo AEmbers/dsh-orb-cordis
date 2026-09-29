@@ -568,9 +568,12 @@ describe('ball control socket', { concurrency: 1 }, () => {
       )).at(-1) as Record<string, unknown>
       assert.equal(settledReasoning.running, false)
       assert.equal(settledReasoning.text, '想一下')
-      assert.equal(client.messages.filter((message) => (
+      // The final text lives on exactly one block key (history repeats are the response re-flag).
+      assert.equal(new Set(client.messages.filter((message) => (
         message.type === 'block' && textOf(message) === '答案完整'
-      )).length, 1)
+      )).map(keyOf)).size, 1)
+      assert.equal(settled.response, true)
+      assert.equal(settledReasoning.response, true)
     } finally {
       harness.releasePrompt()
       client.socket.end()
@@ -688,6 +691,14 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.equal(texts.get('b:1:1:0'), '嗯')
       assert.equal(texts.get('b:1:1:1'), '好了')
       assert.equal(texts.get('tool:call-x') !== undefined, true)
+      // Only the turn's last message is the final answer: a folded turn keeps just it visible.
+      const lastOf = (key: string) => client.messages.filter((message) => (
+        message.type === 'block' && keyOf(message) === key
+      )).at(-1) as Record<string, unknown>
+      assert.equal(lastOf('b:1:1:0').response, true)
+      assert.equal(lastOf('b:1:1:1').response, true)
+      assert.equal(lastOf('b:1:0:1').response, undefined)
+      assert.equal(lastOf('tool:call-x').response, undefined)
     } finally {
       harness.releasePrompt()
       client.socket.end()

@@ -119,6 +119,11 @@
   margin-top: 4px;
 }
 
+/* A folded turn shows only the agent's final answer; intermediate outputs fold with the process. */
+.turn:not([data-open]) > .block[data-kind="assistant"]:not([data-response]) {
+  display: none;
+}
+
 /* ----- TextShimmer (primitives) ----- */
 
 [data-text-shimmer] {

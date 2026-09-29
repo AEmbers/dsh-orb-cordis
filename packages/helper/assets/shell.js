@@ -1316,6 +1316,8 @@ function main() {
       placeBlock(node, block.kind)
     }
     if (block.kind !== 'tool') node.dataset.state = block.running ? 'running' : 'ok'
+    // A folded turn keeps only the final answer visible (Harness turn-process fold).
+    node.toggleAttribute('data-response', block.response === true)
     if (block.kind === 'user') {
       node.querySelector('.user-bubble').textContent = block.text
     } else if (block.kind === 'reasoning') {

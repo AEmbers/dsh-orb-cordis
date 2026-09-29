@@ -148,6 +148,8 @@ interface BlockMessage {
   readonly text: string
   readonly running: boolean
   readonly interrupted?: true
+  /** Part of the turn's final answer: the only text a folded turn keeps visible. */
+  readonly response?: true
   readonly detail?: ToolDetail
 }
 
@@ -210,6 +212,8 @@ export class OrbRuntime {
   private readonly stepBlocks = new Map<string, string[]>()
   private liveStep: string | undefined
   private orphanFrameLogged = false
+  /** Keys of the newest settled assistant message: the turn's final answer so far. */
+  private responseKeys: string[] = []
   private helperPid: number | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
   private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
@@ -797,6 +801,13 @@ export class OrbRuntime {
     const turn = numberOf(record.turn)
     const step = numberOf(record.step)
     if (record.interrupted === true) this.turnInterrupted = true
+    // Only the newest settled message is the final answer; demote the previous one.
+    const previous = this.responseKeys
+    this.responseKeys = []
+    for (const key of previous) {
+      const item = this.blocks.get(key)
+      if (item?.response === true) this.block(key, item.kind, item.text, false, 'set')
+    }
     const message = asRecord(record.message)
     const content = message?.content
     const parts: unknown[] = typeof content === 'string'
@@ -804,6 +815,7 @@ export class OrbRuntime {
       : Array.isArray(content) ? content : []
     const transient = this.stepBlocks.get(`${turn}:${step}`) ?? []
     this.stepBlocks.delete(`${turn}:${step}`)
+    const writtenKeys: string[] = []
     let cursor = 0
     for (const [index, part] of parts.entries()) {
       const wanted = partKind(asRecord(part))
@@ -821,12 +833,14 @@ export class OrbRuntime {
       }
       key ??= `b:${turn}:${step}:${index}`
       const written = this.applyContent(key, part, false)
-      if (written !== key) this.dropBlock(key)
+      if (written === undefined || written !== key) this.dropBlock(key)
+      if (written !== undefined) writtenKeys.push(written)
     }
     while (cursor < transient.length) {
       this.dropBlock(transient[cursor])
       cursor += 1
     }
+    this.responseKeys = writtenKeys
   }
 
   /** Remove one block everywhere: map, order, and the ball's DOM. */
@@ -877,6 +891,12 @@ export class OrbRuntime {
     }
     this.stepBlocks.clear()
     this.lastAttemptByStep.clear()
+    // Mark the final answer so a folded turn keeps only it visible.
+    for (const key of [...this.responseKeys]) {
+      const item = this.blocks.get(key)
+      if (item) this.block(key, item.kind, item.text, false, 'set')
+    }
+    this.responseKeys = []
     this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
     this.turnInterrupted = false
     this.stopWatch()
@@ -925,6 +945,7 @@ export class OrbRuntime {
     const message: BlockMessage = {
       type: 'block', key, kind, text: next, running,
       ...(this.turnInterrupted && kind === 'assistant' && !running ? { interrupted: true } : {}),
+      ...(this.responseKeys.includes(key) ? { response: true as const } : {}),
       ...(merged === undefined ? {} : { detail: merged }),
     }
     if (!this.blocks.has(key)) {
@@ -1372,6 +1393,7 @@ export class OrbRuntime {
     this.lastAttemptByStep.clear()
     this.stepBlocks.clear()
     this.liveStep = undefined
+    this.responseKeys = []
     this.clearDirty()
     this.selection.setSessionRunning(false)
     this.stopWatch()
