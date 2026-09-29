@@ -98,8 +98,7 @@
   transform: rotate(180deg);
 }
 
-.process-body,
-.turn-answer {
+.process-body {
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -110,12 +109,14 @@
   display: none;
 }
 
-.turn[data-open] .turn-answer:not(:empty) {
-  margin-top: 8px;
+/* Turn content streams in arrival order: process runs and replies interleave. */
+.turn > .process-body,
+.turn > .block {
+  margin-top: 12px;
 }
 
-.turn-answer {
-  gap: 12px;
+.turn:not([data-open]) > .block {
+  margin-top: 4px;
 }
 
 /* ----- TextShimmer (primitives) ----- */
@@ -1036,6 +1037,19 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+/* ToolRow stays collapsed until clicked, as in Harness; open bodies scroll in place. */
+.tool-body {
+  display: none;
+}
+
+.tool[data-open] .tool-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 260px;
+  overflow-y: auto;
 }
 
 .tool-body-scroll {

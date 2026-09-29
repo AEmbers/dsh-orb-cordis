@@ -1445,6 +1445,9 @@ var OrbRuntime = class {
 	missingLogged = false;
 	timer;
 	giveUp;
+	dirty = /* @__PURE__ */ new Set();
+	dirtyTimer;
+	liveAttempts = /* @__PURE__ */ new Map();
 	helperPid;
 	overlayWaiters = /* @__PURE__ */ new Map();
 	tcc;
@@ -1506,6 +1509,57 @@ var OrbRuntime = class {
 			now: () => Date.now()
 		}, options.startMonitor);
 		ctx.provide("computerUseOverlayGuard", this.overlay);
+		this.listenAssistantStream();
+	}
+	/**
+	* Follow the loop's process-local assistant stream so text, thinking, and tool
+	* calls reach the ball while the model is still producing them. The durable
+	* log only records the settled message, which is what the 400 ms poll sees.
+	*/
+	listenAssistantStream() {
+		try {
+			this.ctx.on("agent/assistant-stream", (payload) => this.onAssistantStream(payload), { global: true });
+		} catch (error) {
+			console.error(`dsh-orb: assistant stream unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	onAssistantStream(payload) {
+		if (this.sessionId === void 0) return;
+		const record = asRecord(payload);
+		if (asRecord(asRecord(record?.agent)?.session)?.id !== this.sessionId) return;
+		const frame = asRecord(record?.frame);
+		if (!frame) return;
+		const turn = numberOf(frame.turn);
+		const step = numberOf(frame.step);
+		if (frame.type === "start") {
+			const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
+			const stepKey = `${turn}:${step}`;
+			if (attemptId !== "" && this.liveAttempts.get(stepKey) !== attemptId) {
+				this.liveAttempts.set(stepKey, attemptId);
+				this.rewindLiveStep(turn, step);
+			}
+			return;
+		}
+		if (frame.type !== "chunk") return;
+		if (!asRecord(frame.chunk)) return;
+		this.onChunk({
+			turn,
+			step,
+			chunk: frame.chunk
+		});
+	}
+	/** A retried attempt restarts the same block keys; drop the abandoned partials so appends rebuild cleanly. */
+	rewindLiveStep(turn, step) {
+		const prefix = `b:${turn}:${step}:`;
+		for (const key of [...this.blockOrder]) {
+			if (!key.startsWith(prefix)) continue;
+			const previous = this.blocks.get(key);
+			if (previous?.running !== true) continue;
+			this.blocks.set(key, {
+				...previous,
+				text: ""
+			});
+		}
 	}
 	/** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
 	async start() {
@@ -1585,6 +1639,7 @@ var OrbRuntime = class {
 		if (this.retry) clearTimeout(this.retry);
 		this.retry = void 0;
 		this.stopWatch();
+		this.clearDirty();
 		this.handQuestionBack();
 		this.server?.close();
 		this.server = void 0;
@@ -2032,10 +2087,7 @@ var OrbRuntime = class {
 		this.turnRunning = false;
 		this.idleWarned = false;
 		this.selection.setSessionRunning(false);
-		for (const key of [...this.blockOrder]) {
-			const item = this.blocks.get(key);
-			if (item?.running) this.block(key, item.kind, item.text, false, "set");
-		}
+		for (const key of [...this.blockOrder]) if (this.blocks.get(key)?.running) this.settleBlock(key);
 		this.broadcast({
 			type: "turn",
 			running: false,
@@ -2045,6 +2097,19 @@ var OrbRuntime = class {
 		this.stopWatch();
 		const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === "assistant");
 		console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`);
+	}
+	/** Flip one leftover running block to settled, bypassing the empty-text guard in {@link block}. */
+	settleBlock(key) {
+		const previous = this.blocks.get(key);
+		if (!previous) return;
+		const message = {
+			...previous,
+			running: false,
+			...this.turnInterrupted && previous.kind === "assistant" ? { interrupted: true } : {}
+		};
+		this.blocks.set(key, message);
+		this.dirty.delete(key);
+		this.broadcast(message);
 	}
 	block(key, kind, text, running, mode, detail) {
 		const previous = this.blocks.get(key);
@@ -2080,7 +2145,28 @@ var OrbRuntime = class {
 			}
 		}
 		this.blocks.set(key, message);
+		if (running) {
+			this.dirty.add(key);
+			this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 90);
+			return;
+		}
+		this.dirty.delete(key);
 		this.broadcast(message);
+	}
+	/** Coalesce per-token running-block updates; settled blocks always go out immediately. */
+	flushDirty() {
+		this.dirtyTimer = void 0;
+		const keys = [...this.dirty];
+		this.dirty.clear();
+		for (const key of keys) {
+			const message = this.blocks.get(key);
+			if (message) this.broadcast(message);
+		}
+	}
+	clearDirty() {
+		if (this.dirtyTimer) clearTimeout(this.dirtyTimer);
+		this.dirtyTimer = void 0;
+		this.dirty.clear();
 	}
 	status(text) {
 		this.broadcast({
@@ -2489,6 +2575,8 @@ var OrbRuntime = class {
 		this.blockOrder.length = 0;
 		this.watermark = 0;
 		this.turnRunning = false;
+		this.liveAttempts.clear();
+		this.clearDirty();
 		this.selection.setSessionRunning(false);
 		this.stopWatch();
 		this.broadcast({ type: "reset" });

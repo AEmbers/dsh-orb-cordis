@@ -99,6 +99,16 @@ interface OrbContext {
       readonly agentPreset?: string;
     };
   }) => void): (() => void) | void;
+  on(name: 'agent/assistant-stream', listener: (payload: {
+    readonly agent?: {
+      readonly session?: {
+        readonly id?: unknown;
+      };
+    };
+    readonly frame?: unknown;
+  }) => void, options?: {
+    readonly global?: boolean;
+  }): (() => void) | void;
 }
 interface QuestionRequest {
   readonly questions?: unknown;

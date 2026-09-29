@@ -108,6 +108,14 @@ export interface OrbContext {
     name: 'session/created',
     listener: (session: { readonly header?: { readonly cwd?: string; readonly agentPreset?: string } }) => void,
   ): (() => void) | void
+  on(
+    name: 'agent/assistant-stream',
+    listener: (payload: {
+      readonly agent?: { readonly session?: { readonly id?: unknown } }
+      readonly frame?: unknown
+    }) => void,
+    options?: { readonly global?: boolean },
+  ): (() => void) | void
 }
 
 interface QuestionRequest {
@@ -193,6 +201,9 @@ export class OrbRuntime {
   private missingLogged = false
   private timer: ReturnType<typeof setInterval> | undefined
   private giveUp: ReturnType<typeof setTimeout> | undefined
+  private readonly dirty = new Set<string>()
+  private dirtyTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly liveAttempts = new Map<string, string>()
   private helperPid: number | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
   private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
@@ -230,6 +241,55 @@ export class OrbRuntime {
       now: () => Date.now(),
     }, options.startMonitor)
     ctx.provide('computerUseOverlayGuard', this.overlay)
+    this.listenAssistantStream()
+  }
+
+  /**
+   * Follow the loop's process-local assistant stream so text, thinking, and tool
+   * calls reach the ball while the model is still producing them. The durable
+   * log only records the settled message, which is what the 400 ms poll sees.
+   */
+  private listenAssistantStream(): void {
+    try {
+      this.ctx.on('agent/assistant-stream', (payload) => this.onAssistantStream(payload), { global: true })
+    } catch (error) {
+      console.error(`dsh-orb: assistant stream unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private onAssistantStream(payload: unknown): void {
+    if (this.sessionId === undefined) return
+    const record = asRecord(payload)
+    const agent = asRecord(record?.agent)
+    const session = asRecord(agent?.session)
+    if (session?.id !== this.sessionId) return
+    const frame = asRecord(record?.frame)
+    if (!frame) return
+    const turn = numberOf(frame.turn)
+    const step = numberOf(frame.step)
+    if (frame.type === 'start') {
+      const attemptId = typeof frame.attemptId === 'string' ? frame.attemptId : ''
+      const stepKey = `${turn}:${step}`
+      if (attemptId !== '' && this.liveAttempts.get(stepKey) !== attemptId) {
+        this.liveAttempts.set(stepKey, attemptId)
+        this.rewindLiveStep(turn, step)
+      }
+      return
+    }
+    if (frame.type !== 'chunk') return
+    if (!asRecord(frame.chunk)) return
+    this.onChunk({ turn, step, chunk: frame.chunk })
+  }
+
+  /** A retried attempt restarts the same block keys; drop the abandoned partials so appends rebuild cleanly. */
+  private rewindLiveStep(turn: number, step: number): void {
+    const prefix = `b:${turn}:${step}:`
+    for (const key of [...this.blockOrder]) {
+      if (!key.startsWith(prefix)) continue
+      const previous = this.blocks.get(key)
+      if (previous?.running !== true) continue
+      this.blocks.set(key, { ...previous, text: '' })
+    }
   }
 
   /** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
@@ -311,6 +371,7 @@ export class OrbRuntime {
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
     this.stopWatch()
+    this.clearDirty()
     this.handQuestionBack()
     this.server?.close()
     this.server = undefined
@@ -785,13 +846,27 @@ export class OrbRuntime {
     this.selection.setSessionRunning(false)
     for (const key of [...this.blockOrder]) {
       const item = this.blocks.get(key)
-      if (item?.running) this.block(key, item.kind, item.text, false, 'set')
+      if (item?.running) this.settleBlock(key)
     }
     this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
     this.turnInterrupted = false
     this.stopWatch()
     const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === 'assistant')
     console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`)
+  }
+
+  /** Flip one leftover running block to settled, bypassing the empty-text guard in {@link block}. */
+  private settleBlock(key: string): void {
+    const previous = this.blocks.get(key)
+    if (!previous) return
+    const message: BlockMessage = {
+      ...previous,
+      running: false,
+      ...(this.turnInterrupted && previous.kind === 'assistant' ? { interrupted: true as const } : {}),
+    }
+    this.blocks.set(key, message)
+    this.dirty.delete(key)
+    this.broadcast(message)
   }
 
   private block(
@@ -831,7 +906,30 @@ export class OrbRuntime {
       }
     }
     this.blocks.set(key, message)
+    if (running) {
+      this.dirty.add(key)
+      this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 90)
+      return
+    }
+    this.dirty.delete(key)
     this.broadcast(message)
+  }
+
+  /** Coalesce per-token running-block updates; settled blocks always go out immediately. */
+  private flushDirty(): void {
+    this.dirtyTimer = undefined
+    const keys = [...this.dirty]
+    this.dirty.clear()
+    for (const key of keys) {
+      const message = this.blocks.get(key)
+      if (message) this.broadcast(message)
+    }
+  }
+
+  private clearDirty(): void {
+    if (this.dirtyTimer) clearTimeout(this.dirtyTimer)
+    this.dirtyTimer = undefined
+    this.dirty.clear()
   }
 
   private status(text: string): void {
@@ -1227,6 +1325,8 @@ export class OrbRuntime {
     this.blockOrder.length = 0
     this.watermark = 0
     this.turnRunning = false
+    this.liveAttempts.clear()
+    this.clearDirty()
     this.selection.setSessionRunning(false)
     this.stopWatch()
     this.broadcast({ type: 'reset' })

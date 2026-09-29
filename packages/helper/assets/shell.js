@@ -510,7 +510,7 @@ function main() {
   function setProcessOpen(group, open) {
     if (!group) return
     group.preferredOpen = open
-    const foldable = group.body.childElementCount > 0
+    const foldable = group.bodies.some((body) => body.childElementCount > 0)
     const shown = open && foldable
     group.section.toggleAttribute('data-open', shown)
     group.header.toggleAttribute('data-open', shown)
@@ -561,11 +561,7 @@ function main() {
     const chevron = icon(CHEVRON_DOWN)
     chevron.classList.add('process-chevron')
     header.append(label, chevron)
-    const body = document.createElement('div')
-    body.className = 'process-body'
-    const answer = document.createElement('div')
-    answer.className = 'turn-answer'
-    section.append(header, body, answer)
+    section.append(header)
     const loose = []
     let anchor = null
     for (const child of transcript.children) {
@@ -581,10 +577,10 @@ function main() {
     }
     if (anchor) transcript.insertBefore(section, anchor)
     else transcript.append(section)
-    for (const node of loose) answer.append(node)
+    for (const node of loose) section.append(node)
     const live = running
     const group = {
-      section, header, label, chevron, body, answer, live,
+      section, header, label, chevron, bodies: [], current: undefined, live,
       startedAt: live ? Date.now() : undefined,
       elapsedMs: undefined,
       preferredOpen: live,
@@ -660,19 +656,37 @@ function main() {
     })
   }
 
+  /**
+   * Chronological placement, as in Harness: replies sit between the process
+   * runs that produced them. Thinking and tool blocks join the trailing
+   * process body; a reply closes that run, so later tools open a new one.
+   */
   function placeBlock(node, kind) {
     if (kind === 'user') {
       closeProcess()
       transcript.append(node)
       return
     }
-    if (kind === 'assistant') {
-      if (processGroup) processGroup.answer.append(node)
-      else transcript.append(node)
+    // With no turn section at all a reply stays loose; the next thinking/tool block scoops it in.
+    if (kind === 'assistant' && processGroup === undefined) {
+      transcript.append(node)
       return
     }
     const group = ensureProcess()
-    group.body.append(node)
+    if (kind === 'assistant') {
+      group.current = undefined
+      group.section.append(node)
+      return
+    }
+    let body = group.current
+    if (body === undefined) {
+      body = document.createElement('div')
+      body.className = 'process-body'
+      group.section.append(body)
+      group.bodies.push(body)
+      group.current = body
+    }
+    body.append(node)
     setProcessOpen(group, group.preferredOpen === true)
   }
 
@@ -738,10 +752,11 @@ function main() {
     }
   }
 
-  function renderMarkdownBody(element, text, { compact = false } = {}) {
+  function renderMarkdownBody(element, text, { compact = false, live = false } = {}) {
     element.innerHTML = renderMarkdown(text, { compact, copyLabel: chatLabels.copy })
     wireCopyButtons(element)
-    void upgradeCodeBlocks(element)
+    // Shiki runs on settled content only; re-highlighting every delta is too costly while streaming.
+    if (!live) void upgradeCodeBlocks(element)
   }
 
   function shimmer(element, active) {
@@ -1256,7 +1271,7 @@ function main() {
 
   function updateAssistantNode(node, block) {
     const body = node.querySelector('.am-body')
-    renderMarkdownBody(body, block.text)
+    renderMarkdownBody(body, block.text, { live: block.running === true })
     const existing = node.querySelector('.am-stopped')
     if (block.interrupted === true) {
       const chip = existing ?? document.createElement('span')
@@ -1310,14 +1325,35 @@ function main() {
       if (block.running) preview.setAttribute('data-streaming', 'true')
       else preview.removeAttribute('data-streaming')
       node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
-      renderMarkdownBody(node.querySelector('.think-body'), block.text, { compact: true })
+      renderMarkdownBody(node.querySelector('.think-body'), block.text, { compact: true, live: block.running === true })
       syncThinkPreview(node)
     } else if (block.kind === 'tool') {
       updateToolNode(node, block)
     } else {
       updateAssistantNode(node, block)
     }
-    transcript.scrollTop = transcript.scrollHeight
+  }
+
+  /**
+   * Transcript events apply in arrival order on one animation frame, so a turn
+   * marker never lands before the blocks queued ahead of it, and the view only
+   * scrolls when the reader is already at the bottom.
+   */
+  const staged = []
+  let stagedFrame
+  function stage(message) {
+    staged.push(message)
+    stagedFrame ??= requestAnimationFrame(() => {
+      stagedFrame = undefined
+      const list = staged.splice(0)
+      const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120
+      for (const item of list) {
+        if (item.type === 'block') upsertBlock(item)
+        else if (item.type === 'turn') setRunning(item.running === true, item.interrupted === true)
+        else if (item.type === 'reset') clearTranscript()
+      }
+      if (nearBottom) transcript.scrollTop = transcript.scrollHeight
+    })
   }
 
   function renderHistory() {
@@ -1873,8 +1909,8 @@ function main() {
     continueFlow()
   })
 
-  api.onBlock(upsertBlock)
-  api.onTurn((turn) => { setRunning(turn?.running === true, turn?.interrupted === true) })
+  api.onBlock((block) => { stage(block) })
+  api.onTurn((turn) => { stage({ type: 'turn', ...(turn ?? {}) }) })
   api.onSession((id) => { sessionId = typeof id === 'string' ? id : '' })
   api.onHistory((items) => {
     historyItems = Array.isArray(items) ? items : []
@@ -1885,7 +1921,7 @@ function main() {
     permission = preset
     renderPermission()
   })
-  api.onReset(() => { clearTranscript() })
+  api.onReset(() => { stage({ type: 'reset' }) })
   api.onAttach((text) => {
     if (typeof text !== 'string' || text === '') return
     void setExpanded(true).then(() => {
