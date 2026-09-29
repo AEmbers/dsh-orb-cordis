@@ -49,6 +49,7 @@ interface Harness {
   savedDefaults: { provider: string; model: string; reasoningEffort?: string }[]
   listItems: Row[]
   pins: { preset: string; cwd?: string }[]
+  inject: (sessionId: string, row: EventRow) => void
   question: (
     request: { agent?: { id?: string }; questions?: unknown },
     next: () => Promise<{ answers: { id: string; selected: string[] }[] }>,
@@ -181,6 +182,10 @@ function boot(extra: {
     savedDefaults,
     listItems,
     pins,
+    inject(sessionId, row) {
+      const row0 = sessions.get(sessionId)
+      if (row0) row0.events.push(row)
+    },
     get question() { return question },
     holdPrompt() {
       promptGate = new Promise((resolve) => { releasePrompt = resolve })
@@ -483,6 +488,55 @@ describe('ball control socket', { concurrency: 1 }, () => {
       const second = client.messages.filter((message) => message.type === 'tcc').at(-1) as { status: TccStatus }
       assert.equal(second.status.screen, 'needsRelaunch')
       assert.deepEqual(opened, ['screen'])
+    } finally {
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
+  it('carries tool arguments, results, and interruption to the ball', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      harness.holdPrompt()
+      client.send({ type: 'prompt', text: '看看' })
+      await waitFor(() => harness.calls.prompt.length > 0)
+      harness.inject(sessionId, {
+        type: 'tool/call', seq: 1,
+        data: { turn: 1, step: 0, callId: 'call-9', name: 'bash', arguments: '{"command":"ls","description":"list"}' },
+      })
+      harness.inject(sessionId, {
+        type: 'tool/result', seq: 2,
+        data: {
+          turn: 1, step: 0,
+          message: { toolCallId: 'call-9', isError: true, content: [{ type: 'text', text: 'boom' }] },
+          error: { name: 'ExecError', code: 'E1', reason: 'nope' },
+        },
+      })
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 3,
+        data: { turn: 1, step: 0, interrupted: true, message: { content: [{ type: 'text', text: '部分' }] }, stream: [] },
+      })
+      harness.inject(sessionId, { type: 'turn/end', seq: 4, data: {} })
+      harness.releasePrompt()
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && message.text === 'bash' && (message as { detail?: { result?: string } }).detail?.result === 'boom'
+      )))
+      const tool = client.messages.filter((message) => message.type === 'block' && message.text === 'bash').at(-1) as {
+        detail?: { args: string; result: string; isError: boolean; error?: { name: string }; cwd: string }
+      }
+      assert.equal(tool.detail?.args, '{"command":"ls","description":"list"}')
+      assert.equal(tool.detail?.isError, true)
+      assert.equal(tool.detail?.error?.name, 'ExecError')
+      assert.equal(tool.detail?.cwd, orb)
+      const assistant = client.messages.filter((message) => message.type === 'block' && message.kind === 'assistant').at(-1) as { interrupted?: true }
+      assert.equal(assistant.interrupted, true)
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'turn' && message.running === false && (message as { interrupted?: true }).interrupted === true
+      )))
     } finally {
       client.socket.end()
       harness.runtime.halt()

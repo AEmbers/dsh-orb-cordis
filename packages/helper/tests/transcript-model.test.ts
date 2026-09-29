@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { processLabel, reasoningSummary } from '../assets/transcript-model.js'
+import { processLabel, reasoningSummary, classifyTool, deriveSummary, formatToolBody, terminalCardModel, terminalFailed, searchCardModel, webCardModel, diffCardModel, diffTotals, diffLines, processTitle, toolTitle, readCardModel } from '../assets/transcript-model.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -43,10 +43,109 @@ describe('turn process label', () => {
     assert.equal(processLabel({ zh: false, running: true, elapsedMs: 3_661_000 }), 'Deep diving for 1h 01m 1s')
   })
 
-  it('uses the replay label when the turn has no start time', () => {
-    assert.equal(processLabel({ zh: true, running: false }), '已思考')
-    assert.equal(processLabel({ zh: false, running: false }), 'Thought for a while')
+  it('uses the Worked label when the turn has no start time', () => {
+    assert.equal(processLabel({ zh: true, running: false }), '已完成工作')
+    assert.equal(processLabel({ zh: false, running: false }), 'Worked')
     assert.equal(processLabel({ zh: true, running: true }), '深度求索中')
+  })
+
+  it('names stop and fail endings, and prefixes the step title', () => {
+    assert.equal(processLabel({ zh: true, running: false, end: 'stopped' }), '已停止')
+    assert.equal(processLabel({ zh: false, running: false, end: 'failed' }), 'Failed')
+    assert.equal(processLabel({ zh: true, running: false, elapsedMs: 5000, title: '执行了命令' }), '执行了命令，用时 5秒')
+    assert.equal(processLabel({ zh: false, running: false, elapsedMs: 5000, title: 'Ran commands' }), 'Ran commands, Took 5s')
+  })
+})
+
+describe('tool row model', () => {
+  it('classifies tools into variants and localized titles', () => {
+    assert.equal(classifyTool('bash'), 'bash')
+    assert.equal(classifyTool('web_fetch'), 'read')
+    assert.equal(classifyTool('grep'), 'search')
+    assert.equal(classifyTool('unknown_thing'), 'others')
+    assert.equal(toolTitle('bash', true), '运行命令')
+    assert.equal(toolTitle('web_search', true), '网页搜索')
+    assert.equal(toolTitle('web_search', false), 'Search')
+    assert.equal(toolTitle('todo_write', true), '更新任务清单')
+  })
+
+  it('derives summaries from arguments, appending the tool name for generic rows', () => {
+    assert.equal(deriveSummary('read', JSON.stringify({ file_path: '/tmp/a.txt\nsecond' })), '/tmp/a.txt')
+    assert.equal(deriveSummary('bash', JSON.stringify({ description: 'list files', command: 'ls' })), 'list files')
+    assert.equal(deriveSummary('search', JSON.stringify({ queries: ['a', 'b'] })), 'a, b')
+    assert.equal(deriveSummary('others', JSON.stringify({ task: 'hello' })), 'hello')
+  })
+
+  it('formats generic bodies as pretty JSON and unwraps run_code programs', () => {
+    assert.equal(formatToolBody('read', '{"file_path":"a"}'), '{\n  "file_path": "a"\n}')
+    assert.equal(formatToolBody('code', '{"code":"let x = 1"}'), 'let x = 1')
+    assert.equal(formatToolBody('read', 'not json'), 'not json')
+  })
+})
+
+describe('tool card models', () => {
+  it('derives a terminal card from a bash call and exit marker', () => {
+    const card = terminalCardModel('bash', JSON.stringify({ command: 'ls -la', description: 'list files' }), [
+      { type: 'text', text: 'file-a\nfile-b\n[exit code: 2]' },
+    ])
+    assert.equal(card?.command, 'ls -la')
+    assert.equal(card?.exitCode, 2)
+    assert.equal(card?.output, 'file-a\nfile-b')
+    assert.equal(terminalFailed(card), true)
+  })
+
+  it('treats persistent shells and non-text results as generic', () => {
+    assert.equal(terminalCardModel('bash', JSON.stringify({ command: 'x' }), [{ type: 'text', text: '[exit code: 0]' }]), null)
+    const noDescription = terminalCardModel('bash', JSON.stringify({ command: 'x' }), undefined)
+    assert.equal(noDescription, null)
+  })
+
+  it('derives a read card from result metadata and the envelope', () => {
+    const card = readCardModel({
+      path: '/tmp/a.txt',
+      offset: 1,
+      totalLines: 2,
+      lines: [{ number: 1, text: 'first' }, { number: 2, text: 'second' }],
+    }, [{ type: 'text', text: '<path>/tmp/a.txt</path>\n<type>file</type>\n<content>\nfirst\nsecond\n</content>' }])
+    assert.equal(card?.label, '/tmp/a.txt')
+    assert.equal(card?.lines.length, 2)
+    assert.equal(card?.totalLines, 2)
+  })
+
+  it('derives search and web cards from metadata', () => {
+    const search = searchCardModel({
+      truncated: false, total: 2, shape: 'matches',
+      files: [{ path: 'a.ts', matches: [{ lineNumber: 1, line: 'x' }] }, { path: 'b.ts', matches: [{ lineNumber: 2, line: 'y' }] }],
+    })
+    assert.equal(search?.card.kind, 'matches')
+    assert.equal(search?.card.files.length, 2)
+    const web = webCardModel({ truncated: true, answer: 'an answer', sources: [{ url: 'https://a', title: 'A' }] })
+    assert.equal(web?.kind, 'search')
+    assert.equal(web?.sources.length, 1)
+    const fetch = webCardModel({ truncated: false, url: 'https://b', statusCode: 200 })
+    assert.equal(fetch?.kind, 'fetch')
+    assert.equal(fetch?.statusCode, 200)
+  })
+
+  it('derives diffs from write/edit arguments and result metadata', () => {
+    const intended = diffCardModel('write', JSON.stringify({ file_path: 'a.ts', content: 'new' }), false, '')
+    assert.equal(intended?.diffs.length, 1)
+    const applied = diffCardModel('edit', JSON.stringify({ file_path: 'a.ts', old_string: 'a\nb', new_string: 'a\nc' }), false, {
+      diffs: [{ path: 'a.ts', oldText: 'a\nb', newText: 'a\nc' }],
+    })
+    assert.equal(applied?.diffs.length, 1)
+    assert.deepEqual(diffTotals(applied.diffs), { added: 1, removed: 1 })
+    const lines = diffLines(applied.diffs[0])
+    assert.deepEqual(lines.map((line) => line.kind), ['context', 'del', 'add'])
+    assert.equal(diffCardModel('edit', JSON.stringify({ file_path: 'a.ts', old_string: 'x', new_string: 'y' }), true, ''), null)
+  })
+})
+
+describe('step process title', () => {
+  it('joins the top tool categories with the Harness phrasing', () => {
+    assert.equal(processTitle(['bash'], true), '执行了命令')
+    assert.equal(processTitle(['bash', 'read'], false), 'Ran commands and read files')
+    assert.equal(processTitle(['read', 'read', 'bash', 'grep'], true), '已读取文件，执行了命令，已搜索代码')
   })
 })
 

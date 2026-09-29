@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld('dshOrb', {
   openMenu() {
     return ipcRenderer.invoke('orb:menu')
   },
+  openExternal(url) {
+    ipcRenderer.send('orb:open-external', url)
+  },
   tccStatus() {
     return ipcRenderer.invoke('orb:tcc-status')
   },

@@ -2,7 +2,7 @@
  * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } from 'electron'
 import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -152,6 +152,12 @@ ipcMain.handle('orb:menu', async (event) => {
   if (!fromBall(event) || !win) return
   write({ type: 'menu' })
   await showMenu(win)
+})
+
+ipcMain.on('orb:open-external', (event, url) => {
+  if (!fromBall(event)) return
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url) || url.length > 4000) return
+  void shell.openExternal(url)
 })
 
 ipcMain.handle('orb:tcc-status', (event) => {

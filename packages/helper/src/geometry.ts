@@ -1,10 +1,10 @@
 /**
  * Floating-ball window geometry.
- * Sizes match the fork overlay: a 72px ball, 12px of transparent chrome, and a 320×420 panel.
+ * Sizes match the fork overlay: a 72px ball, 12px of transparent chrome, and a 420×420 panel.
  */
 
 export const BALL_SIZE = 72
-export const PANEL_SIZE = { width: 320, height: 420 } as const
+export const PANEL_SIZE = { width: 420, height: 420 } as const
 export const CHROME_INSET = 12
 export const BALL_WINDOW_SIZE = BALL_SIZE + 2 * CHROME_INSET
 export const PANEL_WINDOW_SIZE = {

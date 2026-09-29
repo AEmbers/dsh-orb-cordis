@@ -18,7 +18,12 @@
     "assets"
   ],
   "scripts": {
-    "build": "tsdown"
+    "build": "tsdown && tsdown --config tsdown.vendor.config.ts",
+    "build:vendor": "tsdown --config tsdown.vendor.config.ts"
+  },
+  "devDependencies": {
+    "@shikijs/langs": "^4.3.1",
+    "shiki": "^4.3.1"
   },
   "license": "MIT"
 }

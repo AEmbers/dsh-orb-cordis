@@ -115,4 +115,8 @@ declare module 'electron' {
     on(channel: string, listener: (event: unknown, ...args: unknown[]) => void): void
     handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void
   }
+
+  export const shell: {
+    openExternal(url: string, options?: { activate?: boolean }): Promise<void>
+  }
 }

@@ -1,9 +1,9 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, screen } from "electron";
+import { BrowserWindow, Menu, app, dialog, ipcMain, screen, shell } from "electron";
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 const PANEL_SIZE = {
-	width: 320,
+	width: 420,
 	height: 420
 };
 const PANEL_WINDOW_SIZE = {
@@ -988,6 +988,11 @@ ipcMain.handle("orb:menu", async (event) => {
 	if (!fromBall(event) || !win) return;
 	write({ type: "menu" });
 	await showMenu(win);
+});
+ipcMain.on("orb:open-external", (event, url) => {
+	if (!fromBall(event)) return;
+	if (typeof url !== "string" || !/^https?:\/\//i.test(url) || url.length > 4e3) return;
+	shell.openExternal(url);
 });
 ipcMain.handle("orb:tcc-status", (event) => {
 	if (!fromBall(event)) return tccUnavailable();

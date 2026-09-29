@@ -120,12 +120,27 @@ interface QuestionAnswer {
   readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[]
 }
 
+interface ToolDetail {
+  /** Raw argument JSON exactly as the model produced it. */
+  readonly args: string
+  /** Flattened result text, present once the call settled. */
+  readonly result: string
+  readonly isError: boolean
+  readonly error?: { readonly name: string; readonly code: string; readonly reason?: string }
+  /** Result-time tool-private presentation payload (diffs, read windows), JSON text. */
+  readonly meta: string
+  /** Session workspace root, for path display. */
+  readonly cwd: string
+}
+
 interface BlockMessage {
   readonly type: 'block'
   readonly key: string
   readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool'
   readonly text: string
   readonly running: boolean
+  readonly interrupted?: true
+  readonly detail?: ToolDetail
 }
 
 interface PendingQuestion {
@@ -157,6 +172,7 @@ export class OrbRuntime {
   private pending: PendingQuestion | undefined
   private questionBody: readonly ShownQuestion[] | undefined
   private turnRunning = false
+  private turnInterrupted = false
   private child: ChildProcess | undefined
   private binary = ''
   private failures = 0
@@ -423,6 +439,7 @@ export class OrbRuntime {
   private async onPrompt(text: string): Promise<void> {
     const trimmed = text.trim()
     if (!trimmed) return
+    this.turnInterrupted = false
     this.block(`user:${randomUUID()}`, 'user', trimmed, false, 'set')
     this.turnRunning = true
     this.selection.setSessionRunning(true)
@@ -608,10 +625,52 @@ export class OrbRuntime {
       if (!name) return
       const id = callId(data)
       const existing = id ? undefined : this.runningTool(name)
-      this.block(id ? `tool:${id}` : existing ?? `tool:${seq}`, 'tool', name, false, 'set')
+      const key = id ? `tool:${id}` : existing ?? `tool:${seq}`
+      this.block(key, 'tool', name, false, 'set', {
+        args: clip(toolArguments(data), 4000),
+      })
+      return
+    }
+    if (type === 'tool/result') {
+      this.onToolResult(data)
       return
     }
     if (type === 'turn/end') this.finishTurn()
+  }
+
+  /** Join a settled result to its call by id, carrying error state and meta. */
+  private onToolResult(data: unknown): void {
+    const record = asRecord(data)
+    if (!record) return
+    const id = callId(record)
+    const message = asRecord(record.message)
+    const callIdValue = id || (message ? callIdValueOf(message) : '')
+    if (!callIdValue) return
+    const key = `tool:${callIdValue}`
+    const existing = this.blocks.get(key)
+    const name = existing?.kind === 'tool' ? existing.text : toolName(record) || ''
+    const content = Array.isArray(message?.content) ? message?.content : []
+    const error = asRecord(record.error)
+    const detail: ToolDetail = {
+      args: existing?.detail?.args ?? '',
+      result: clip(resultText(content, error ?? undefined), 8000),
+      isError: message?.isError === true,
+      ...(error === undefined ? {} : {
+        error: {
+          name: typeof error.name === 'string' ? error.name : 'Error',
+          code: typeof error.code === 'string' ? error.code : 'unknown',
+          ...(typeof error.reason === 'string' ? { reason: clip(error.reason, 2000) } : {}),
+        },
+      }),
+      meta: clip(jsonText(record.meta), 12000),
+      cwd: this.sessionCwd(),
+    }
+    this.block(key, 'tool', name, false, 'set', detail)
+  }
+
+  private sessionCwd(): string {
+    if (!this.sessionId) return ''
+    return this.ctx.sessions.get(this.sessionId)?.header?.cwd ?? ''
   }
 
   private onChunk(data: unknown): void {
@@ -634,7 +693,12 @@ export class OrbRuntime {
       const name = typeof chunk.name === 'string' ? chunk.name : ''
       if (!name) return
       const id = typeof chunk.id === 'string' ? chunk.id : ''
-      this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, true, 'set')
+      const delta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+      const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
+      const previous = this.blocks.get(key)
+      this.block(key, 'tool', name, true, 'set', {
+        args: clip(`${previous?.detail?.args ?? ''}${delta}`, 4000),
+      })
       return
     }
     if (chunk.type === 'block-end') this.applyContent(key, chunk.block, turn, step, index, false)
@@ -645,6 +709,7 @@ export class OrbRuntime {
     if (!record) return
     const turn = numberOf(record.turn)
     const step = numberOf(record.step)
+    if (record.interrupted === true) this.turnInterrupted = true
     if (Array.isArray(record.stream)) {
       for (const item of record.stream) this.foldStream(item, turn, step)
     }
@@ -678,9 +743,12 @@ export class OrbRuntime {
     const name = typeof record.name === 'string' ? record.name : ''
     if (!name) return
     const id = typeof record.id === 'string' ? record.id : ''
+    const args = Array.isArray(record.chunks)
+      ? record.chunks.filter((part): part is string => typeof part === 'string').join('')
+      : ''
     const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
     if (!id && this.blocks.has(key)) return
-    this.block(key, 'tool', name, false, 'set')
+    this.block(key, 'tool', name, false, 'set', { args: clip(args, 4000) })
   }
 
   private applyContent(key: string, part: unknown, turn: number, step: number, index: number, running: boolean): void {
@@ -698,7 +766,9 @@ export class OrbRuntime {
     const id = typeof block.id === 'string' ? block.id : typeof block.callId === 'string' ? block.callId : ''
     const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
     if (!id && this.blocks.has(toolKey)) return
-    this.block(toolKey, 'tool', name, running, 'set')
+    this.block(toolKey, 'tool', name, running, 'set', {
+      args: clip(typeof block.arguments === 'string' ? block.arguments : '', 4000),
+    })
   }
 
   private runningTool(name: string): string | undefined {
@@ -717,7 +787,8 @@ export class OrbRuntime {
       const item = this.blocks.get(key)
       if (item?.running) this.block(key, item.kind, item.text, false, 'set')
     }
-    this.broadcast({ type: 'turn', running: false })
+    this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
+    this.turnInterrupted = false
     this.stopWatch()
     const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === 'assistant')
     console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`)
@@ -729,11 +800,29 @@ export class OrbRuntime {
     text: string,
     running: boolean,
     mode: 'set' | 'append',
+    detail?: Partial<ToolDetail>,
   ): void {
-    const previous = this.blocks.get(key)?.text ?? ''
-    const next = clip(mode === 'append' ? `${previous}${text}` : text, 20_000)
-    if (!next.trim()) return
-    const message: BlockMessage = { type: 'block', key, kind, text: next, running }
+    const previous = this.blocks.get(key)
+    const previousText = previous?.text ?? ''
+    const next = clip(mode === 'append' ? `${previousText}${text}` : text, 20_000)
+    if (!next.trim() && kind !== 'tool') return
+    const mergedDetail = detail === undefined ? previous?.detail : {
+      args: detail.args ?? previous?.detail?.args ?? '',
+      result: detail.result ?? previous?.detail?.result ?? '',
+      isError: detail.isError ?? previous?.detail?.isError ?? false,
+      error: detail.error ?? previous?.detail?.error,
+      meta: detail.meta ?? previous?.detail?.meta ?? '',
+      cwd: detail.cwd ?? previous?.detail?.cwd ?? '',
+    }
+    const merged: ToolDetail | undefined = mergedDetail === undefined ? undefined : {
+      ...mergedDetail,
+      ...(mergedDetail.error === undefined ? {} : { error: mergedDetail.error }),
+    }
+    const message: BlockMessage = {
+      type: 'block', key, kind, text: next, running,
+      ...(this.turnInterrupted && kind === 'assistant' && !running ? { interrupted: true } : {}),
+      ...(merged === undefined ? {} : { detail: merged }),
+    }
     if (!this.blocks.has(key)) {
       this.blockOrder.push(key)
       while (this.blockOrder.length > 200) {
@@ -1225,6 +1314,44 @@ function toolName(data: unknown): string {
   if (typeof data !== 'object' || data === null) return ''
   const name = (data as { name?: unknown }).name
   return typeof name === 'string' ? name : ''
+}
+
+function toolArguments(data: unknown): string {
+  if (typeof data !== 'object' || data === null) return ''
+  const args = (data as { arguments?: unknown }).arguments
+  return typeof args === 'string' ? args : ''
+}
+
+function callIdValueOf(data: unknown): string {
+  const record = asRecord(data)
+  if (!record) return ''
+  const id = record.toolCallId ?? record.callId ?? record.id
+  return typeof id === 'string' ? id : ''
+}
+
+/** Flatten result content blocks to display text (tool-call-model resultText). */
+function resultText(content: unknown, error?: { name?: unknown; code?: unknown }): string {
+  const parts: string[] = []
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      const record = asRecord(block)
+      if (record?.type === 'text' && typeof record.text === 'string') parts.push(record.text)
+      else parts.push(JSON.stringify(block, null, 2))
+    }
+  }
+  if (parts.length === 0 && error !== undefined) {
+    parts.push(`${typeof error.name === 'string' ? error.name : 'Error'}: ${typeof error.code === 'string' ? error.code : 'unknown'}`)
+  }
+  return parts.join('\n')
+}
+
+function jsonText(value: unknown): string {
+  if (value === undefined || value === null) return ''
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return ''
+  }
 }
 
 function isQuestionAnswer(message: unknown): message is { type: 'question-answer'; id: string; answers: unknown } {

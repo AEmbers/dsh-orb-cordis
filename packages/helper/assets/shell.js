@@ -1,5 +1,13 @@
 import { renderMarkdown } from './markdown.js'
-import { processLabel, reasoningSummary } from './transcript-model.js'
+import {
+  processLabel, reasoningSummary, processTitle, toolTitle, toolLabels, classifyTool, deriveSummary,
+  formatToolBody, terminalCardModel, terminalFailed, readCardModel,
+  searchCardModel, webCardModel, diffCardModel, diffTotals, diffLines,
+} from './transcript-model.js'
+import { upgradeCodeBlocks } from './highlight.js'
+import {
+  icon, THINK, CHEVRON_DOWN, CHEVRON_UP, SEARCH, GLOBE, BROWSE, EDIT, CODE, API, SPARKLE, stateSpinner,
+} from './icons.js'
 
 const api = window.dshOrb
 const COLLAPSE_MS = 180
@@ -34,6 +42,8 @@ const zh = {
   unanswered: '请选择一个选项或填写自定义答案。',
   think: '思考',
   running: '运行中',
+  stopped: '已停止',
+  failed: '失败',
   tooLong: '最多 8000 个字符，已保留输入。',
   truncated: '已截断',
   chipDismiss: '移除',
@@ -76,6 +86,8 @@ const en = {
   unanswered: 'Please select an option or enter a custom answer.',
   think: 'Think',
   running: 'Running',
+  stopped: 'Stopped',
+  failed: 'Failed',
   tooLong: 'Limit is 8000 characters. The text was kept.',
   truncated: 'truncated',
   chipDismiss: 'Remove',
@@ -99,10 +111,12 @@ const en = {
 
 const PROMPT_LIMIT = 8000
 const messages = navigator.language.toLowerCase().startsWith('zh') ? zh : en
+const chatLabels = toolLabels(messages === zh)
 
 function applyColorScheme(dark) {
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
-  document.documentElement.toggleAttribute('data-ds-dark-theme', dark)
+  // Theme sheets key dark overrides on body[data-ds-dark-theme], as in Harness.
+  document.body.toggleAttribute('data-ds-dark-theme', dark)
 }
 
 const colorScheme = window.matchMedia('(prefers-color-scheme: dark)')
@@ -141,16 +155,6 @@ function editableTarget(node) {
 
 function isComposing(event) {
   return event.isComposing === true || event.keyCode === 229
-}
-
-const THINK_MARKUP = '<path d="M10.7554 5.24466C13.9891 8.4783 15.3769 12.3333 13.8552 13.8551C12.3335 15.3768 8.4785 13.989 5.24478 10.7553C2.01111 7.52165 0.623307 3.66664 2.14504 2.14491C3.66676 0.623189 7.52178 2.01099 10.7554 5.24466Z" stroke="currentColor"></path><path d="M10.7554 10.7553C7.52178 13.989 3.66676 15.3768 2.14504 13.8551C0.623307 12.3333 2.01111 8.4783 5.24478 5.24466C8.4785 2.01099 12.3335 0.623189 13.8552 2.14491C15.3769 3.66664 13.9891 7.52165 10.7554 10.7553Z" stroke="currentColor"></path><path d="M8.9587 8.00025C8.9587 8.52835 8.5306 8.95655 8.0024 8.95655C7.47429 8.95655 7.04614 8.52835 7.04614 8.00025C7.04614 7.47209 7.47429 7.04395 8.0024 7.04395C8.5306 7.04395 8.9587 7.47209 8.9587 8.00025Z" fill="currentColor"></path>'
-const CHEVRON_DOWN = '<path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6" stroke="currentColor"></path>'
-const CHEVRON_UP = '<path d="M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10" stroke="currentColor"></path>'
-
-function icon(markup) {
-  const host = document.createElement('span')
-  host.innerHTML = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">${markup}</svg>`
-  return host.firstElementChild
 }
 
 function parseRecommendedLabel(label) {
@@ -312,7 +316,7 @@ function main() {
     freezeGif(gif)
   }
 
-  function setRunning(next) {
+  function setRunning(next, interrupted = false) {
     running = next
     if (pageClosed()) return
     document.body.classList.toggle('running', running)
@@ -328,7 +332,18 @@ function main() {
         refreshProcessLabel(group)
         startProcessClock()
       }
-    } else if (processGroup) {
+      return
+    }
+    if (interrupted) {
+      for (const node of blocks.values()) {
+        if (node.dataset.kind === 'tool' && node.dataset.state === 'running') {
+          node.dataset.state = 'stopped'
+          const summary = node.querySelector('.tool-summary')
+          summary?.classList.add('tool-stopped-summary')
+        }
+      }
+    }
+    if (processGroup) {
       stopProcessClock()
       freezeProcess(processGroup)
       setProcessOpen(processGroup, false)
@@ -481,10 +496,14 @@ function main() {
     const elapsedMs = group.live
       ? group.startedAt === undefined ? undefined : Date.now() - group.startedAt
       : group.elapsedMs
+    const title = !group.live && group.tools.size > 0
+      ? processTitle([...group.tools], messages === zh)
+      : undefined
     group.label.textContent = processLabel({
       zh: messages === zh,
       running: group.live,
       elapsedMs,
+      title,
     })
   }
 
@@ -569,6 +588,7 @@ function main() {
       startedAt: live ? Date.now() : undefined,
       elapsedMs: undefined,
       preferredOpen: live,
+      tools: new Set(),
     }
     processGroup = group
     header.addEventListener('click', () => {
@@ -601,7 +621,7 @@ function main() {
     leading.className = 'think-leading'
     const idle = document.createElement('span')
     idle.className = 'think-icon-idle'
-    idle.append(icon(THINK_MARKUP))
+    idle.append(icon(THINK))
     const hover = document.createElement('span')
     hover.className = 'think-chevron-hover'
     hover.append(icon(CHEVRON_DOWN))
@@ -622,7 +642,7 @@ function main() {
     summary.append(summaryText)
     row.append(leading, title, separator, summary)
     const body = document.createElement('div')
-    body.className = 'think-body block-body'
+    body.className = 'think-body'
     disclosure.append(row, body)
     node.append(status, disclosure)
     const toggle = () => {
@@ -656,36 +676,646 @@ function main() {
     setProcessOpen(group, group.preferredOpen === true)
   }
 
+  const CHAT_READ_MAX_LINES = 8
+  const CHAT_SEARCH_MAX_LINES = 8
+  const CHAT_DIFF_MAX_LINES = 9
+
+  function toolIcon(name) {
+    if (name === 'web_search') return icon(GLOBE)
+    if (name === 'web_fetch' || name === 'read' || name === 'read_image') return icon(BROWSE)
+    switch (classifyTool(name)) {
+      case 'bash': return icon(API)
+      case 'search': return icon(SEARCH)
+      case 'write':
+      case 'edit': return icon(EDIT)
+      case 'code': return icon(CODE)
+      default: return icon(SPARKLE)
+    }
+  }
+
+  function copyToClipboard(text, button) {
+    const restore = () => {
+      button.textContent = chatLabels.copy
+      delete button.dataset.copied
+    }
+    const done = () => {
+      button.textContent = chatLabels.copied
+      button.dataset.copied = 'true'
+      setTimeout(restore, 1600)
+    }
+    if (navigator.clipboard?.writeText !== undefined) {
+      navigator.clipboard.writeText(text).then(done, () => {
+        restore()
+      })
+      return
+    }
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.append(area)
+    area.select()
+    try {
+      if (document.execCommand('copy')) done()
+      else restore()
+    } catch {
+      restore()
+    }
+    area.remove()
+  }
+
+  function wireCopyButtons(root) {
+    for (const button of root.querySelectorAll('.cb-copy, .term-copy, .search-copy')) {
+      if (button.dataset.wired === 'true') continue
+      button.dataset.wired = 'true'
+      button.addEventListener('click', (event) => {
+        event.stopPropagation()
+        const block = button.closest('.cb, .term, .search')
+        const code = block?.querySelector('pre')?.textContent ?? ''
+        copyToClipboard(code, button)
+      })
+    }
+  }
+
+  function renderMarkdownBody(element, text, { compact = false } = {}) {
+    element.innerHTML = renderMarkdown(text, { compact, copyLabel: chatLabels.copy })
+    wireCopyButtons(element)
+    void upgradeCodeBlocks(element)
+  }
+
+  function shimmer(element, active) {
+    if (active) element.setAttribute('data-text-shimmer', '')
+    else element.removeAttribute('data-text-shimmer')
+  }
+
+  /** Bounded row list with the primitives' ghost "… N more" expander. */
+  function cappedRows(target, rows, cap) {
+    target.replaceChildren()
+    const show = rows.slice(0, cap)
+    for (const row of show) target.append(row)
+    if (rows.length <= cap) return
+    const expand = document.createElement('button')
+    expand.type = 'button'
+    expand.className = 'card-expand'
+    expand.textContent = `… ${rows.length - show.length}`
+    let open = false
+    expand.addEventListener('click', (event) => {
+      event.stopPropagation()
+      open = !open
+      for (const row of rows.slice(show.length)) {
+        if (open) target.append(row)
+        else row.remove()
+      }
+      expand.remove()
+      if (!open) {
+        for (const row of rows.slice(cap)) row.remove()
+        target.append(expand)
+      }
+      expand.textContent = open ? chatLabels.collapse : `… ${rows.length - show.length}`
+      if (!open) return
+    })
+    target.append(expand)
+  }
+
+  function buildTerminalCard(model) {
+    const card = document.createElement('div')
+    card.className = 'term'
+    card.setAttribute('data-body', 'true')
+    const header = document.createElement('div')
+    header.className = 'term-header'
+    const prompt = document.createElement('div')
+    prompt.className = 'term-prompt'
+    const line = document.createElement('div')
+    line.className = 'term-prompt-line'
+    const command = document.createElement('span')
+    command.className = 'term-command'
+    command.textContent = model.command
+    line.append(command)
+    const failed = terminalFailed(model)
+    const status = document.createElement('span')
+    status.className = 'term-status'
+    if (model.signal !== undefined) status.textContent = chatLabels.signal(model.signal)
+    else if (model.exitCode === undefined || model.exitCode === null) status.textContent = chatLabels.noExitCode
+    else {
+      status.textContent = chatLabels.exitCode(model.exitCode)
+      if (model.exitCode === 0 && !failed) status.setAttribute('data-ok', 'true')
+    }
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.className = 'term-copy'
+    copy.textContent = chatLabels.copy
+    prompt.append(line)
+    header.append(prompt, status, copy)
+    card.append(header)
+    const output = document.createElement('div')
+    output.className = 'term-output'
+    const text = model.output ?? ''
+    if (text === '') {
+      const empty = document.createElement('div')
+      empty.className = 'term-empty'
+      empty.textContent = chatLabels.noOutput
+      card.append(empty)
+    } else {
+      for (const row of text.split('\n')) {
+        const lineEl = document.createElement('div')
+        lineEl.className = 'term-line'
+        lineEl.textContent = row
+        output.append(lineEl)
+      }
+      card.append(output)
+    }
+    return card
+  }
+
+  function buildDiffCard(model) {
+    const card = document.createElement('div')
+    card.className = 'diff'
+    const body = document.createElement('div')
+    body.className = 'diff-body'
+    const rows = []
+    for (const hunk of model.diffs) {
+      const path = document.createElement('div')
+      path.className = 'diff-line diff-path'
+      path.textContent = hunk.path
+      rows.push(path)
+      for (const line of diffLines(hunk)) {
+        const row = document.createElement('div')
+        row.className = `diff-line diff-${line.kind}`
+        row.textContent = line.text
+        rows.push(row)
+      }
+    }
+    cappedRows(body, rows, CHAT_DIFF_MAX_LINES)
+    card.append(body)
+    return card
+  }
+
+  function buildReadCard(model) {
+    const card = document.createElement('div')
+    card.className = 'cb'
+    card.setAttribute('data-code-lang', model.lang ?? '')
+    const bannerWrap = document.createElement('div')
+    bannerWrap.className = 'cb-banner-wrap'
+    const banner = document.createElement('div')
+    banner.className = 'cb-banner'
+    banner.setAttribute('data-code-block-banner', '')
+    const info = document.createElement('div')
+    info.className = 'cb-infostring'
+    info.textContent = `${model.label} · ${chatLabels.readWindow(Math.min(model.lines.length, CHAT_READ_MAX_LINES), model.totalLines)}`
+    const action = document.createElement('div')
+    action.className = 'cb-action'
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.className = 'cb-copy'
+    copy.textContent = chatLabels.copy
+    action.append(copy)
+    banner.append(info, action)
+    bannerWrap.append(banner)
+    card.append(bannerWrap)
+    const pre = document.createElement('pre')
+    const code = document.createElement('code')
+    const rows = model.lines.map((line) => {
+      const row = document.createElement('div')
+      row.className = 'read-line'
+      const gutter = document.createElement('span')
+      gutter.className = 'read-gutter'
+      gutter.textContent = String(line.number)
+      const content = document.createElement('span')
+      content.className = 'read-content'
+      content.textContent = line.text
+      row.append(gutter, content)
+      return row
+    })
+    const gutterWidth = `${String(model.totalLines).length + 1}ch`
+    card.style.setProperty('--dsl-read-gutter', gutterWidth)
+    cappedRows(code, rows, CHAT_READ_MAX_LINES)
+    pre.append(code)
+    card.append(pre)
+    return card
+  }
+
+  function buildSearchCard(cardModel) {
+    const card = document.createElement('div')
+    card.className = 'search'
+    const header = document.createElement('div')
+    header.className = 'search-header'
+    const summary = document.createElement('div')
+    summary.className = 'search-summary'
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.className = 'search-copy'
+    copy.textContent = chatLabels.copy
+    header.append(summary, copy)
+    card.append(header)
+    const body = document.createElement('div')
+    body.className = 'search-body'
+    const rows = []
+    if (cardModel.kind === 'matches') {
+      const shown = cardModel.files.reduce((total, file) => total + file.matches.length, 0)
+      summary.textContent = chatLabels.matchesSummary(shown, cardModel.total, cardModel.files.length, cardModel.truncated)
+      for (const file of cardModel.files) {
+        const group = document.createElement('div')
+        group.className = 'search-file-header'
+        const path = document.createElement('span')
+        path.className = 'search-file-path'
+        path.textContent = file.path
+        const count = document.createElement('span')
+        count.className = 'search-file-count'
+        count.textContent = String(file.matches.length)
+        group.append(path, count)
+        rows.push(group)
+        for (const match of file.matches) {
+          const line = document.createElement('div')
+          line.className = 'search-line'
+          const number = document.createElement('span')
+          number.className = 'search-line-number'
+          number.textContent = `${match.lineNumber}  `
+          line.append(number)
+          line.append(document.createTextNode(match.line))
+          rows.push(line)
+        }
+      }
+    } else {
+      summary.textContent = chatLabels.pathsSummary(cardModel.paths.length, cardModel.total, cardModel.truncated)
+      for (const path of cardModel.paths) {
+        const line = document.createElement('div')
+        line.className = 'search-line'
+        line.textContent = path
+        rows.push(line)
+      }
+    }
+    if (rows.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'search-empty'
+      empty.textContent = chatLabels.noResults
+      card.append(empty)
+      return card
+    }
+    cappedRows(body, rows, CHAT_SEARCH_MAX_LINES)
+    card.append(body)
+    return card
+  }
+
+  function linkOrText(className, url, label) {
+    if (!/^https?:\/\//i.test(url)) return document.createTextNode(label)
+    const link = document.createElement('a')
+    link.className = className
+    link.href = url
+    link.textContent = label
+    return link
+  }
+
+  function buildWebCard(model) {
+    const card = document.createElement('div')
+    card.className = 'web'
+    if (model.kind === 'fetch') {
+      const fetch = document.createElement('div')
+      fetch.className = 'web-fetch'
+      fetch.append(linkOrText('web-fetch-url', model.url, model.url))
+      const meta = document.createElement('div')
+      meta.className = 'web-fetch-meta'
+      const status = document.createElement('span')
+      status.className = 'web-status'
+      status.textContent = `HTTP ${model.statusCode}`
+      meta.append(status)
+      if (model.truncated) {
+        const truncated = document.createElement('span')
+        truncated.className = 'web-truncated'
+        truncated.textContent = chatLabels.contentTruncated
+        meta.append(truncated)
+      }
+      fetch.append(url, meta)
+      card.append(fetch)
+      return card
+    }
+    if (model.answer) {
+      const answer = document.createElement('div')
+      answer.className = 'web-answer'
+      renderMarkdownBody(answer, model.answer)
+      card.append(answer)
+    }
+    if (model.sources.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'web-empty'
+      empty.textContent = chatLabels.webNoResults
+      card.append(empty)
+      return card
+    }
+    const sources = document.createElement('ol')
+    sources.className = 'web-sources'
+    for (const source of model.sources) {
+      const item = document.createElement('li')
+      item.className = 'web-source'
+      item.append(linkOrText('web-source-link', source.url, source.title !== undefined && source.title !== '' ? source.title : source.url))
+      if (source.snippet !== undefined && source.snippet !== '') {
+        const snippet = document.createElement('div')
+        snippet.className = 'web-snippet'
+        snippet.textContent = source.snippet
+        item.append(snippet)
+      }
+      if (source.publishedAt !== undefined && source.publishedAt !== '') {
+        const published = document.createElement('div')
+        published.className = 'web-published'
+        published.textContent = source.publishedAt
+        item.append(published)
+      }
+      sources.append(item)
+    }
+    card.append(sources)
+    if (model.truncated) {
+      const truncated = document.createElement('div')
+      truncated.className = 'web-truncated'
+      truncated.textContent = chatLabels.sourcesTruncated
+      card.append(truncated)
+    }
+    return card
+  }
+
+  function buildIoCard(inputText, outputText, isError) {
+    const card = document.createElement('div')
+    card.className = 'tool-io-card'
+    if (inputText !== null) {
+      const section = document.createElement('div')
+      section.className = 'tool-io-section'
+      const label = document.createElement('span')
+      label.className = 'tool-io-label'
+      label.textContent = chatLabels.input
+      const text = document.createElement('span')
+      text.className = 'tool-io-text'
+      text.textContent = inputText
+      section.append(label, text)
+      card.append(section)
+    }
+    if (inputText !== null && outputText !== null) {
+      const divider = document.createElement('span')
+      divider.className = 'tool-io-divider'
+      card.append(divider)
+    }
+    if (outputText !== null) {
+      const section = document.createElement('div')
+      section.className = 'tool-io-section'
+      const label = document.createElement('span')
+      label.className = 'tool-io-label'
+      label.textContent = chatLabels.output
+      const text = document.createElement('span')
+      text.className = 'tool-io-text'
+      text.textContent = outputText
+      if (isError) text.setAttribute('data-error', 'true')
+      section.append(label, text)
+      card.append(section)
+    }
+    return card
+  }
+
+  function updateToolNode(node, block) {
+    const detail = block.detail
+    const name = block.text
+    const root = node.querySelector('.tool')
+    const variant = classifyTool(name)
+    const state = block.running === true
+      ? detail?.args ? 'running' : 'preparing'
+      : detail?.isError === true ? 'error' : node.dataset.state === 'stopped' ? 'stopped' : 'ok'
+    root.dataset.tool = name
+    root.dataset.variant = variant
+    root.dataset.state = state
+    node.dataset.state = state
+
+    node.querySelector('.visually-hidden').textContent = state === 'error' ? messages.failed
+      : state === 'stopped' ? messages.stopped
+        : state === 'running' || state === 'preparing' ? messages.running
+          : ''
+
+    const title = node.querySelector('.tool-title')
+    title.textContent = toolTitle(name, messages === zh)
+    shimmer(title, state === 'running' || state === 'preparing')
+
+    const meta = parseMeta(detail?.meta)
+    const terminal = terminalCardModel(name, detail?.args ?? '', detail?.result ? [{ type: 'text', text: detail.result }] : [])
+    const read = terminal === null ? readCardModel(meta, detail?.result ? [{ type: 'text', text: detail.result }] : []) : null
+    const search = read === null && terminal === null ? searchCardModel(meta) : null
+    const web = search === null && read === null && terminal === null ? webCardModel(meta) : null
+    const diff = terminal === null && read === null && search === null && web === null
+      ? diffCardModel(name, detail?.args ?? '', detail?.isError === true, meta)
+      : null
+
+    const expandable = state !== 'preparing'
+      && (Boolean(detail?.args) || Boolean(detail?.result) || terminal !== null || read !== null || search !== null || web !== null || diff !== null)
+    const row = node.querySelector('.tool-row')
+    root.toggleAttribute('data-expandable', expandable)
+    row.toggleAttribute('data-expandable', expandable)
+    if (!expandable) {
+      root.removeAttribute('data-open')
+      row.setAttribute('aria-expanded', 'false')
+    }
+
+    let summaryText
+    if (state === 'error') {
+      const first = firstLineOf(detail?.result ?? '')
+      summaryText = first !== '' ? first : summaryFor(name, detail?.args ?? '')
+    } else if (state === 'stopped') {
+      summaryText = summaryFor(name, detail?.args ?? '')
+    } else {
+      summaryText = summaryFor(name, detail?.args ?? '')
+    }
+    const sep = node.querySelector('.tool-sep')
+    const summary = node.querySelector('.tool-summary')
+    const fileLink = node.querySelector('.tool-file-link')
+    const suffix = node.querySelector('.tool-summary-suffix')
+    const showCollapsed = summaryText !== '' && state !== 'preparing'
+    sep.hidden = !showCollapsed
+    summary.hidden = !showCollapsed
+    summary.textContent = summaryText
+    fileLink.hidden = true
+    shimmer(summary, state === 'running')
+
+    if (diff !== null && state !== 'error' && state !== 'stopped') {
+      const totals = diffTotals(diff.diffs)
+      suffix.hidden = false
+      suffix.textContent = `+${totals.added} -${totals.removed}`
+      suffix.className = 'tool-summary-suffix tool-diff-stat'
+    } else {
+      suffix.hidden = true
+      suffix.textContent = ''
+      suffix.className = 'tool-summary-suffix'
+    }
+
+    const bodyWrap = node.querySelector('.tool-body')
+    bodyWrap.replaceChildren()
+    if (terminal !== null) {
+      bodyWrap.className = 'tool-body tool-terminal-body'
+      bodyWrap.append(buildTerminalCard(terminal))
+    } else if (diff !== null) {
+      bodyWrap.className = 'tool-body tool-diff-body'
+      bodyWrap.append(buildDiffCard(diff))
+    } else if (read !== null) {
+      bodyWrap.className = 'tool-body tool-read-body'
+      bodyWrap.append(buildReadCard(read))
+    } else if (search !== null) {
+      bodyWrap.className = 'tool-body tool-search-body'
+      bodyWrap.append(buildSearchCard(search.card))
+      if (search.recovery !== undefined) {
+        const recovery = document.createElement('div')
+        recovery.className = 'tool-search-recovery'
+        recovery.textContent = search.recovery
+        bodyWrap.append(recovery)
+      }
+    } else if (web !== null) {
+      bodyWrap.className = 'tool-body tool-web-body'
+      bodyWrap.append(buildWebCard(web))
+    } else {
+      bodyWrap.className = 'tool-body'
+      const input = formatToolBody(variant, detail?.args ?? '')
+      const output = detail?.result ? detail.result : null
+      if (input !== null || output !== null) {
+        bodyWrap.append(buildIoCard(input, output, detail?.isError === true))
+      }
+    }
+    if (processGroup !== undefined) processGroup.tools.add(name)
+    refreshProcessLabel(processGroup)
+  }
+
+  function parseMeta(text) {
+    if (typeof text !== 'string' || text === '') return null
+    try {
+      return JSON.parse(text)
+    } catch {
+      return null
+    }
+  }
+
+  function firstLineOf(text) {
+    const newline = text.indexOf('\n')
+    return newline === -1 ? text : text.slice(0, newline)
+  }
+
+  function summaryFor(name, argsRaw) {
+    const variant = classifyTool(name)
+    const base = deriveSummary(variant, argsRaw)
+    if (variant !== 'others') return base
+    return base === '' ? name : `${name} · ${base}`
+  }
+
+  function createToolNode(block) {
+    const node = document.createElement('article')
+    node.className = 'block'
+    node.dataset.kind = 'tool'
+    const root = document.createElement('div')
+    root.className = 'tool'
+    const status = document.createElement('span')
+    status.className = 'visually-hidden'
+    const row = document.createElement('div')
+    row.className = 'tool-row'
+    row.setAttribute('role', 'button')
+    row.tabIndex = 0
+    row.setAttribute('aria-expanded', 'false')
+    const leading = document.createElement('span')
+    leading.className = 'tool-leading'
+    const idle = document.createElement('span')
+    idle.className = 'tool-icon-idle'
+    idle.append(toolIcon(block.text))
+    const hover = document.createElement('span')
+    hover.className = 'tool-chevron-hover'
+    hover.append(icon(CHEVRON_DOWN))
+    const open = document.createElement('span')
+    open.className = 'tool-chevron-open'
+    open.append(icon(CHEVRON_UP))
+    leading.append(idle, hover, open)
+    const title = document.createElement('span')
+    title.className = 'tool-title'
+    const sep = document.createElement('span')
+    sep.className = 'tool-sep'
+    sep.setAttribute('aria-hidden', 'true')
+    const summary = document.createElement('span')
+    summary.className = 'tool-summary'
+    const suffix = document.createElement('span')
+    suffix.className = 'tool-summary-suffix'
+    suffix.hidden = true
+    const fileLink = document.createElement('span')
+    fileLink.className = 'tool-file-link'
+    fileLink.hidden = true
+    row.append(leading, title, sep, summary, suffix, fileLink)
+    const body = document.createElement('div')
+    body.className = 'tool-body'
+    root.append(status, row, body)
+    node.append(root)
+    const toggle = () => {
+      if (root.hasAttribute('data-expandable') === false) return
+      const isOpen = !root.hasAttribute('data-open')
+      root.toggleAttribute('data-open', isOpen)
+      row.setAttribute('aria-expanded', String(isOpen))
+    }
+    row.addEventListener('click', toggle)
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      toggle()
+    })
+    return node
+  }
+
+  function updateAssistantNode(node, block) {
+    const body = node.querySelector('.am-body')
+    renderMarkdownBody(body, block.text)
+    const existing = node.querySelector('.am-stopped')
+    if (block.interrupted === true) {
+      const chip = existing ?? document.createElement('span')
+      chip.className = 'am-stopped'
+      chip.textContent = messages.stopped
+      if (existing === null) body.append(chip)
+    } else {
+      existing?.remove()
+    }
+  }
+
   function upsertBlock(block) {
     if (typeof block?.key !== 'string' || typeof block.text !== 'string') return
     let node = blocks.get(block.key)
     if (node === undefined) {
-      node = document.createElement('article')
-      node.className = 'block'
-      node.dataset.kind = block.kind
-      if (block.kind === 'reasoning') createThink(node)
-      else {
+      if (block.kind === 'user') {
+        node = document.createElement('div')
+        node.className = 'user-row'
+        node.dataset.kind = 'user'
+        const bubble = document.createElement('div')
+        bubble.className = 'user-bubble'
+        node.append(bubble)
+      } else if (block.kind === 'assistant') {
+        node = document.createElement('article')
+        node.className = 'block'
+        node.dataset.kind = 'assistant'
+        const root = document.createElement('div')
+        root.className = 'am'
         const body = document.createElement('div')
-        body.className = 'block-body'
-        node.append(body)
+        body.className = 'am-body'
+        root.append(body)
+        node.append(root)
+      } else if (block.kind === 'tool') {
+        node = createToolNode(block)
+      } else {
+        node = document.createElement('article')
+        node.className = 'block'
+        node.dataset.kind = 'reasoning'
+        createThink(node)
       }
       blocks.set(block.key, node)
       placeBlock(node, block.kind)
     }
-    node.dataset.state = block.running ? 'running' : 'ok'
-    if (block.kind === 'reasoning') {
+    if (block.kind !== 'tool') node.dataset.state = block.running ? 'running' : 'ok'
+    if (block.kind === 'user') {
+      node.querySelector('.user-bubble').textContent = block.text
+    } else if (block.kind === 'reasoning') {
       const summary = reasoningSummary(block.text, block.running === true)
       node.querySelector('.think-summary-text').textContent = summary
       const preview = node.querySelector('.think-summary')
       if (block.running) preview.setAttribute('data-streaming', 'true')
       else preview.removeAttribute('data-streaming')
       node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
-      node.querySelector('.think-body').innerHTML = renderMarkdown(block.text)
+      renderMarkdownBody(node.querySelector('.think-body'), block.text, { compact: true })
       syncThinkPreview(node)
     } else if (block.kind === 'tool') {
-      node.querySelector('.block-body').textContent = block.text
+      updateToolNode(node, block)
     } else {
-      node.querySelector('.block-body').innerHTML = renderMarkdown(block.text)
+      updateAssistantNode(node, block)
     }
     transcript.scrollTop = transcript.scrollHeight
   }
@@ -1244,7 +1874,7 @@ function main() {
   })
 
   api.onBlock(upsertBlock)
-  api.onTurn((turn) => { setRunning(turn?.running === true) })
+  api.onTurn((turn) => { setRunning(turn?.running === true, turn?.interrupted === true) })
   api.onSession((id) => { sessionId = typeof id === 'string' ? id : '' })
   api.onHistory((items) => {
     historyItems = Array.isArray(items) ? items : []
@@ -1276,6 +1906,14 @@ function main() {
     syncGif()
   })
   api.onStatus((text) => { status.textContent = typeof text === 'string' ? text : '' })
+  transcript.addEventListener('click', (event) => {
+    const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
+    if (anchor === null) return
+    const href = anchor.getAttribute('href') ?? ''
+    if (!/^https?:\/\//i.test(href)) return
+    event.preventDefault()
+    api.openExternal(href)
+  })
   api.onQuestion((payload) => { showQuestion(payload) })
   api.onQuestionClear((id) => { clearQuestion(id) })
   api.onQuestionError((payload) => {
