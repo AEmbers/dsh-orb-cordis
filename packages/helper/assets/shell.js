@@ -33,6 +33,8 @@ const zh = {
   unanswered: '请选择一个选项或填写自定义答案。',
   think: '思考',
   running: '运行中',
+  tooLong: '最多 8000 个字符，已保留输入。',
+  truncated: '已截断',
 }
 const en = {
   title: 'Desktop agent',
@@ -56,8 +58,11 @@ const en = {
   unanswered: 'Please select an option or enter a custom answer.',
   think: 'Think',
   running: 'Running',
+  tooLong: 'Limit is 8000 characters. The text was kept.',
+  truncated: 'truncated',
 }
 
+const PROMPT_LIMIT = 8000
 const messages = navigator.language.toLowerCase().startsWith('zh') ? zh : en
 
 function applyColorScheme(dark) {
@@ -71,6 +76,12 @@ colorScheme.addEventListener('change', () => applyColorScheme(colorScheme.matche
 
 function promptText(prompt) {
   return (prompt.innerText ?? prompt.textContent ?? '').replaceAll('\u00a0', ' ')
+}
+
+function clipSelection(text) {
+  if (text.length <= PROMPT_LIMIT) return text
+  const mark = `\n${messages.truncated}`
+  return `${text.slice(0, Math.max(0, PROMPT_LIMIT - mark.length))}${mark}`
 }
 
 function insertPlainText(prompt, text) {
@@ -999,6 +1010,10 @@ function main() {
     event.preventDefault()
     const text = promptText(prompt).trim()
     if (text === '') return
+    if (text.length > PROMPT_LIMIT) {
+      status.textContent = messages.tooLong
+      return
+    }
     clearPrompt()
     setHistoryOpen(false)
     setPermissionOpen(false)
@@ -1101,8 +1116,9 @@ function main() {
   api.onReset(() => { clearTranscript() })
   api.onAttach((text) => {
     if (typeof text !== 'string' || text === '') return
+    const body = clipSelection(text)
     void setExpanded(true).then(() => {
-      insertPlainText(prompt, text)
+      insertPlainText(prompt, body)
       prompt.focus()
     })
   })

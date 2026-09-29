@@ -8,6 +8,7 @@ export interface ContextMenuState {
   readonly background: MenuSelection
   readonly selectionEnabled: boolean
   readonly millifractionEnabled: boolean
+  readonly openMain: boolean
 }
 
 export interface ContextMenuActions {
@@ -28,6 +29,7 @@ export function contextMenuTemplate(state: ContextMenuState, zh: boolean, action
   return [
     {
       label: zh ? '打开主窗口' : 'Open Main Window',
+      enabled: state.openMain,
       click: () => { actions.openMain() },
     },
     {

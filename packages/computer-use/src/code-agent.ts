@@ -15,6 +15,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SessionCreateRequest, SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import { watchCodeAgentCompletion } from './code-agent-completion.ts'
 import { attachUnattendedCodeAgent } from './code-agent-unattended.ts'
+import { selectModelKeepDefault, type SelectModelKeepDefaultHost } from './select-model.ts'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -39,7 +40,7 @@ interface Delegation {
 export const name = 'tool-code-agent'
 
 /** Services required at apply time. Missing Session Remote keeps the plugin pending. */
-export const inject = ['tools', 'sessionController']
+export const inject = ['tools', 'sessionController', 'agentDefaultModel']
 
 /** Model-visible tool that creates or continues a background Code session. */
 export const TOOL_NAME = 'code_agent'
@@ -339,12 +340,14 @@ export function apply(ctx: Context): void {
         cwd = directory ?? caller.session.header.cwd ?? ''
         const pref = (ctx.get('orbCodeAgentModel') as OrbCodeAgentModel | undefined)?.currentSelection()
         if (pref !== undefined) {
-          await ctx.sessionController.selectModel({
+          await selectModelKeepDefault({
+            sessionController: ctx.sessionController,
+            agentDefaultModel: ctx.get('agentDefaultModel') as SelectModelKeepDefaultHost['agentDefaultModel'],
+          }, {
             sessionId,
             provider: pref.provider,
             model: pref.model,
             ...(pref.reasoningEffort === undefined ? {} : { reasoningEffort: pref.reasoningEffort }),
-            saveAsDefault: false,
           })
         }
       } else {

@@ -342,5 +342,6 @@ export function installCoordinateMode(ctx: Context): void {
   }
   ctx.on('agent/created', ({ agent }: { agent: Agent }) => {
     stampCoordinateMode(ctx, agent.session)
+    return undefined
   })
 }

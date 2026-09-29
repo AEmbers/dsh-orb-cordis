@@ -176,6 +176,32 @@ function attachUnattendedCodeAgent(code, attached) {
 	}
 }
 //#endregion
+//#region src/select-model.ts
+/** Apply a model to one session, then put the global default back if it changed. */
+async function selectModelKeepDefault(ctx, request) {
+	const defaults = ctx.agentDefaultModel;
+	const previous = defaults?.currentSelection();
+	const chosen = {
+		provider: request.provider,
+		model: request.model,
+		...request.reasoningEffort === void 0 ? {} : { reasoningEffort: request.reasoningEffort }
+	};
+	await ctx.sessionController.selectModel({
+		sessionId: request.sessionId,
+		...chosen
+	});
+	if (defaults === void 0) {
+		console.error("dsh-orb: agentDefaultModel is missing; a session model may replace the global default");
+		return;
+	}
+	if (previous === void 0 || sameSelection(previous, chosen)) return;
+	await defaults.saveSelection(previous);
+	console.error("dsh-orb: restored the global default model after a session-only selection");
+}
+function sameSelection(left, right) {
+	return left.provider === right.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort;
+}
+//#endregion
 //#region src/code-agent.ts
 /**
 * Computer Use-only tools that create, continue, list, and stop first-class
@@ -185,7 +211,11 @@ function attachUnattendedCodeAgent(code, attached) {
 /** Cordis plugin name. */
 const name = "tool-code-agent";
 /** Services required at apply time. Missing Session Remote keeps the plugin pending. */
-const inject = ["tools", "sessionController"];
+const inject = [
+	"tools",
+	"sessionController",
+	"agentDefaultModel"
+];
 /** Model-visible tool that creates or continues a background Code session. */
 const TOOL_NAME = "code_agent";
 /** Model-visible tool that lists this Computer Use caller's Code sessions. */
@@ -392,12 +422,14 @@ function apply(ctx) {
 				created = true;
 				cwd = directory ?? caller.session.header.cwd ?? "";
 				const pref = ctx.get("orbCodeAgentModel")?.currentSelection();
-				if (pref !== void 0) await ctx.sessionController.selectModel({
+				if (pref !== void 0) await selectModelKeepDefault({
+					sessionController: ctx.sessionController,
+					agentDefaultModel: ctx.get("agentDefaultModel")
+				}, {
 					sessionId,
 					provider: pref.provider,
 					model: pref.model,
-					...pref.reasoningEffort === void 0 ? {} : { reasoningEffort: pref.reasoningEffort },
-					saveAsDefault: false
+					...pref.reasoningEffort === void 0 ? {} : { reasoningEffort: pref.reasoningEffort }
 				});
 			} else {
 				sessionId = brandString(args.session_id);

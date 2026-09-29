@@ -58,6 +58,7 @@ describe('ball menu', () => {
       background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
       selectionEnabled: true,
       millifractionEnabled: false,
+      openMain: true,
     }, true, {
       openMain: () => { actions.push('open') },
       setOverlay: () => { actions.push('overlay') },
@@ -75,6 +76,7 @@ describe('ball menu', () => {
       'separator',
       '停用悬浮球',
     ])
+    assert.equal(template[0]?.enabled, true)
     template[0]?.click?.({ checked: false })
     template[3]?.click?.({ checked: false })
     template[4]?.click?.({ checked: true })
@@ -89,6 +91,7 @@ describe('ball menu', () => {
       background: { provider: 'deepseek-official', model: 'plain' },
       selectionEnabled: false,
       millifractionEnabled: false,
+      openMain: false,
     }, false, {
       openMain() {},
       setOverlay() {},
@@ -98,6 +101,7 @@ describe('ball menu', () => {
       disable() {},
     })
     assert.equal(english[0]?.label, 'Open Main Window')
+    assert.equal(english[0]?.enabled, false)
     assert.equal(english.at(-1)?.label, 'Disable floating ball')
   })
 

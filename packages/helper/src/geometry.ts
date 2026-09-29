@@ -77,16 +77,39 @@ function clampWindowOrigin(value: number, workOrigin: number, workSize: number, 
   return clamp(value, workOrigin - CHROME_INSET, workOrigin + workSize - windowSize + CHROME_INSET)
 }
 
-/** Which left or right display edge the ball already overlaps by about one fifth of its width. */
+/**
+ * Which outer display edge the ball already overlaps by about one fifth of its width.
+ * An edge that touches another display is a seam, not a place to dock.
+ */
 export function dockSideForBallOrigin(
   ball: { readonly x: number; readonly y: number },
   bounds: Rect,
+  displays: readonly Rect[] = [],
 ): DockSide | undefined {
   const leftOverlap = bounds.x - ball.x
   const rightOverlap = ball.x + BALL_SIZE - (bounds.x + bounds.width)
-  if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) return 'left'
-  if (rightOverlap >= DOCK_OVERLAP) return 'right'
-  return undefined
+  let side: DockSide | undefined
+  if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) side = 'left'
+  else if (rightOverlap >= DOCK_OVERLAP) side = 'right'
+  if (side === undefined || edgeTouchesDisplay(side, bounds, displays)) return undefined
+  return side
+}
+
+function edgeTouchesDisplay(side: DockSide, bounds: Rect, displays: readonly Rect[]): boolean {
+  const edge = side === 'left' ? bounds.x : bounds.x + bounds.width
+  for (const other of displays) {
+    if (sameRect(other, bounds)) continue
+    const otherEdge = side === 'left' ? other.x + other.width : other.x
+    if (Math.abs(otherEdge - edge) > 8) continue
+    const top = Math.max(bounds.y, other.y)
+    const bottom = Math.min(bounds.y + bounds.height, other.y + other.height)
+    if (bottom > top) return true
+  }
+  return false
+}
+
+function sameRect(left: Rect, right: Rect): boolean {
+  return left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height
 }
 
 /** Hittable strip for a docked tab, flush with a display edge. */
@@ -237,7 +260,7 @@ export class FloatingPlacement {
   constructor(private readonly window: {
     getBounds(): Rect
     setBounds(bounds: Rect): void
-  }, private readonly displayAt: (point: { x: number; y: number }) => DisplayPair) {}
+  }, private readonly displayAt: (point: { x: number; y: number }) => DisplayPair, private readonly displayBounds: () => readonly Rect[] = () => []) {}
 
   /** Resize between the ball and the panel while keeping the ball origin fixed. */
   setExpanded(expanded: boolean): ExpandState {
@@ -300,7 +323,7 @@ export class FloatingPlacement {
     if (isCollapsed(bounds)) {
       const origin = { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
       if (canDock) {
-        const side = dockSideForBallOrigin(origin, display.bounds)
+        const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
       }
       this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)))

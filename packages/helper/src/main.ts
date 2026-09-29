@@ -20,6 +20,7 @@ interface ChromeState {
   background: MenuSelection
   selectionEnabled: boolean
   millifractionEnabled: boolean
+  openMain: boolean
   catalog: MenuCatalog
 }
 
@@ -34,6 +35,7 @@ let chrome: ChromeState = {
   background: defaultSelection,
   selectionEnabled: false,
   millifractionEnabled: false,
+  openMain: false,
   catalog: { groups: [] },
 }
 let avatarToken = 0
@@ -73,7 +75,7 @@ void app.whenReady().then(async () => {
   placement = new FloatingPlacement(win, (point) => {
     const display = screen.getDisplayNearestPoint({ x: Math.round(point.x), y: Math.round(point.y) })
     return { bounds: display.bounds, workArea: display.workArea }
-  })
+  }, () => screen.getAllDisplays().map((display) => display.bounds))
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isVisible()) win.showInactive()
   })
@@ -324,6 +326,7 @@ function readChrome(value: unknown): ChromeState {
     background?: MenuSelection
     selectionEnabled?: unknown
     millifractionEnabled?: unknown
+    openMain?: unknown
     catalog?: MenuCatalog
   }
   return {
@@ -331,6 +334,7 @@ function readChrome(value: unknown): ChromeState {
     background: selectionOr(record.background, chrome.background),
     selectionEnabled: record.selectionEnabled === true,
     millifractionEnabled: record.millifractionEnabled === true,
+    openMain: record.openMain === true,
     catalog: record.catalog ?? { groups: [] },
   }
 }

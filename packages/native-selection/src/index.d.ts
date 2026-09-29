@@ -37,6 +37,7 @@ export function parseSelectionHelperLine(line: string): SelectionHelperEvent | u
 export function draggedFarEnough(dx: number, dy: number): boolean
 export const MIN_DRAG_PX: number
 export function startSelectionMonitor(handlers: SelectionMonitorHandlers): SelectionMonitor | undefined
+export function selectionRuntimeAvailable(): boolean
 export function promptAccessibility(): boolean
 export function accessibilityTrusted(): boolean
 

@@ -19,6 +19,7 @@ export const inject = [
   'sessionController',
   'workspaceController',
   'sessions',
+  'agentDefaultModel',
 ]
 
 export type { OrbContext }

@@ -1,14 +1,13 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { createReadStream, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createReadStream, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { accessibilityTrusted, promptAccessibility, selectionRuntimeAvailable, startSelectionMonitor } from "@dsh-orb/native-selection";
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { pipeline } from "node:stream/promises";
-import { accessibilityTrusted, promptAccessibility, startSelectionMonitor } from "@dsh-orb/native-selection";
 //#region src/tcc.ts
 /**
 * Screen Recording and Accessibility status for the process that actually calls screencapture and osascript.
@@ -248,7 +247,7 @@ var ProfileStore = class {
 		};
 	}
 	writeAvatar(bytes, mime) {
-		writeFileSync(join(this.dir, AVATAR_FILE), bytes);
+		writeBytes(join(this.dir, AVATAR_FILE), bytes);
 		writeJson(join(this.dir, AVATAR_META_FILE), { mime });
 	}
 	restoreAvatar() {
@@ -334,7 +333,12 @@ function record(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function writeJson(file, value) {
-	writeFileSync(file, `${JSON.stringify(value, void 0, 2)}\n`);
+	writeBytes(file, Buffer.from(`${JSON.stringify(value, void 0, 2)}\n`));
+}
+function writeBytes(file, bytes) {
+	const tmp = `${file}.${process.pid}.tmp`;
+	writeFileSync(tmp, bytes);
+	renameSync(tmp, file);
 }
 function isEnoent(error) {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
@@ -542,7 +546,9 @@ async function snapshot(deps) {
 		background: models.background,
 		selectionEnabled: deps.store.selectionEnabled(),
 		millifractionEnabled: deps.store.millifractionEnabled(),
-		tcc: deps.tcc.status()
+		tcc: deps.tcc.status(),
+		helperError: deps.control.helperStatus?.() ?? "",
+		selectionAvailable: selectionRuntimeAvailable()
 	};
 }
 async function catalog(deps) {
@@ -716,30 +722,106 @@ async function resolveElectronBinary() {
 	return binary;
 }
 async function downloadRuntime(dest, binary, marker) {
-	const fileName = assetName();
-	console.error(`dsh-orb: downloading Electron ${ELECTRON_VERSION} (${fileName})`);
-	const expected = expectedHash(await fetchText(`${RELEASE_BASE}/SHASUMS256.txt`), fileName);
-	const zipPath = join(tmpdir(), `dsh-orb-${fileName}`);
+	const parent = dirname(dest);
+	await mkdir(parent, { recursive: true });
+	await withDownloadLock(parent, async () => {
+		if (await exists(binary) && await exists(marker)) return;
+		const fileName = assetName();
+		console.error(`dsh-orb: downloading Electron ${ELECTRON_VERSION} (${fileName})`);
+		const expected = expectedHash(await fetchText(`${RELEASE_BASE}/SHASUMS256.txt`), fileName);
+		const stamp = randomBytes(8).toString("hex");
+		const zipPath = join(parent, `.electron-${stamp}.zip`);
+		const staging = join(parent, `.electron-staging-${stamp}`);
+		try {
+			await downloadVerifiedZip(fileName, expected, zipPath);
+			await mkdir(staging, { recursive: true });
+			await extractZip(zipPath, staging);
+			const stagedBinary = join(staging, binaryRelative());
+			if (process.platform === "darwin") await spawnChecked("/usr/bin/xattr", [
+				"-dr",
+				"com.apple.quarantine",
+				staging
+			]).catch(() => void 0);
+			await chmod(stagedBinary, 493);
+			await access(stagedBinary);
+			await writeFile(join(staging, `.complete-${ELECTRON_VERSION}`), `${ELECTRON_VERSION}\n`);
+			await replaceDirectory(staging, dest);
+		} finally {
+			await rm(zipPath, { force: true });
+			await rm(staging, {
+				recursive: true,
+				force: true
+			});
+		}
+		console.error(`dsh-orb: Electron ${ELECTRON_VERSION} is ready`);
+	});
+}
+/** `mkdir` is the lock. A dead owner, or a lock older than 20 minutes, can be taken over. */
+async function withDownloadLock(parent, task) {
+	const lock = join(parent, "electron-runtime.download.lock");
+	const deadline = Date.now() + 6e5;
+	for (;;) try {
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), `${process.pid}\n${Date.now()}\n`);
+		break;
+	} catch (error) {
+		if (!isEexist(error)) throw error;
+		if (await lockExpired(lock)) {
+			await rm(lock, {
+				recursive: true,
+				force: true
+			});
+			continue;
+		}
+		if (Date.now() > deadline) throw new Error("dsh-orb: Electron download is locked by another process");
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
 	try {
-		await downloadVerifiedZip(fileName, expected, zipPath);
-		await rm(dest, {
+		await task();
+	} finally {
+		await rm(lock, {
 			recursive: true,
 			force: true
 		});
-		await mkdir(dest, { recursive: true });
-		await extractZip(zipPath, dest);
-		if (process.platform === "darwin") await spawnChecked("/usr/bin/xattr", [
-			"-dr",
-			"com.apple.quarantine",
-			dest
-		]).catch(() => void 0);
-		await chmod(binary, 493);
-		await access(binary);
-		await writeFile(marker, `${ELECTRON_VERSION}\n`);
-	} finally {
-		await rm(zipPath, { force: true });
 	}
-	console.error(`dsh-orb: Electron ${ELECTRON_VERSION} is ready`);
+}
+async function lockExpired(lock) {
+	try {
+		const [pidText, startedText] = (await readFile(join(lock, "owner"), "utf8")).split("\n");
+		const pid = Number(pidText);
+		const started = Number(startedText);
+		if (!Number.isInteger(pid) || pid <= 0) return true;
+		if (Number.isFinite(started) && Date.now() - started > 12e5) return true;
+		try {
+			process.kill(pid, 0);
+			return false;
+		} catch {
+			return true;
+		}
+	} catch {
+		return true;
+	}
+}
+async function replaceDirectory(staging, dest) {
+	const retired = `${dest}.retired-${randomBytes(4).toString("hex")}`;
+	let moved = false;
+	if (await exists(dest)) {
+		await rename(dest, retired);
+		moved = true;
+	}
+	try {
+		await rename(staging, dest);
+	} catch (error) {
+		if (moved) await rename(retired, dest).catch(() => void 0);
+		throw error;
+	}
+	if (moved) await rm(retired, {
+		recursive: true,
+		force: true
+	}).catch(() => void 0);
+}
+function isEexist(error) {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
 function assetName() {
 	const platform = process.platform;
@@ -760,9 +842,16 @@ function expectedHash(sums, fileName) {
 	}
 	throw new Error(`dsh-orb: ${fileName} is missing from Electron ${ELECTRON_VERSION} checksums`);
 }
+const CURL_HTTPS = [
+	"--proto",
+	"=https",
+	"--proto-redir",
+	"=https"
+];
 async function fetchText(url) {
 	const { stdout } = await run("curl", [
 		"-fsSL",
+		...CURL_HTTPS,
 		"--max-time",
 		"60",
 		url
@@ -776,6 +865,7 @@ async function downloadVerifiedZip(fileName, expected, dest) {
 		await rm(dest, { force: true });
 		await run("curl", [
 			"-fsSL",
+			...CURL_HTTPS,
 			"--retry",
 			"2",
 			"--retry-delay",
@@ -871,10 +961,13 @@ async function exists(path) {
 * Focus the official desktop window, or open the local web page.
 * The credentialed page address is never written to the log.
 */
-/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
-function mainWindowTarget(ctx, desktop = isDesktopHost()) {
+/**
+* Desktop uses the app's `dsh://open` protocol.
+* `dsh web` has no main window, so the menu item stays disabled and this returns undefined.
+* The credentialed loopback URL is never passed to `open` or `cmd`.
+*/
+function mainWindowTarget(_ctx, desktop = isDesktopHost()) {
 	if (desktop) return "dsh://open";
-	return localPage(ctx);
 }
 /** Command used to focus that window. The target is never logged. */
 function openCommand(target, platform = process.platform) {
@@ -892,31 +985,11 @@ function openCommand(target, platform = process.platform) {
 		args: [target]
 	};
 }
-/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
+/** Focus the desktop main window. Does nothing when this host is `dsh web`. */
 async function openMainWindow(ctx) {
 	const target = mainWindowTarget(ctx);
 	if (target === void 0) return;
 	await spawnOpen(target);
-}
-function localPage(ctx) {
-	let url;
-	try {
-		url = ctx.connection.authenticatedUrl(`http://127.0.0.1:${ctx.webServer.port}`);
-	} catch {
-		console.error("dsh-orb: main window URL is unavailable");
-		return;
-	}
-	try {
-		const hostname = new URL(url).hostname;
-		if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") {
-			console.error("dsh-orb: main window URL is not loopback");
-			return;
-		}
-	} catch {
-		console.error("dsh-orb: main window URL is unavailable");
-		return;
-	}
-	return url;
 }
 function spawnOpen(target) {
 	const { command, args } = openCommand(target);
@@ -1213,6 +1286,32 @@ function productionAccessibility() {
 	};
 }
 //#endregion
+//#region src/select-model.ts
+/** Apply a model to one session, then put the global default back if it changed. */
+async function selectModelKeepDefault(ctx, request) {
+	const defaults = ctx.agentDefaultModel;
+	const previous = defaults?.currentSelection();
+	const chosen = {
+		provider: request.provider,
+		model: request.model,
+		...request.reasoningEffort === void 0 ? {} : { reasoningEffort: request.reasoningEffort }
+	};
+	await ctx.sessionController.selectModel({
+		sessionId: request.sessionId,
+		...chosen
+	});
+	if (defaults === void 0) {
+		console.error("dsh-orb: agentDefaultModel is missing; a session model may replace the global default");
+		return;
+	}
+	if (previous === void 0 || sameSelection(previous, chosen)) return;
+	await defaults.saveSelection(previous);
+	console.error("dsh-orb: restored the global default model after a session-only selection");
+}
+function sameSelection(left, right) {
+	return left.provider === right.provider && left.model === right.model && left.reasoningEffort === right.reasoningEffort;
+}
+//#endregion
 //#region src/orb.ts
 /**
 * NDJSON control plane for the ball, plus the Computer Use session it talks to.
@@ -1243,6 +1342,10 @@ var OrbRuntime = class {
 	workspaceTask;
 	retry;
 	opening = false;
+	pendingStart = false;
+	helperError;
+	userData = "";
+	idleWarned = false;
 	sessionId;
 	sessionError;
 	creating;
@@ -1313,20 +1416,36 @@ var OrbRuntime = class {
 	/** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
 	async start() {
 		if (process.platform === "linux") return;
-		if (this.opening || !this.halted && this.server) return;
-		this.opening = true;
 		this.halted = false;
 		this.failures = 0;
+		this.helperError = void 0;
+		if (this.child !== void 0 && this.child.exitCode === null && this.child.signalCode === null && this.server) return;
+		if (this.retry) clearTimeout(this.retry);
+		this.retry = void 0;
+		if (this.opening) {
+			this.generation += 1;
+			this.pendingStart = true;
+			return;
+		}
+		this.opening = true;
 		this.generation += 1;
 		const generation = this.generation;
 		try {
 			await this.begin(generation);
 		} finally {
 			this.opening = false;
+			if (this.pendingStart) {
+				this.pendingStart = false;
+				if (!this.halted) await this.start();
+			}
 		}
 	}
+	/** Short code the settings page can show after the helper gives up. */
+	helperStatus() {
+		return this.helperError ?? "";
+	}
 	async begin(generation) {
-		await this.listen();
+		if (!this.server) await this.listen();
 		if (this.halted || generation !== this.generation) {
 			this.server?.close();
 			this.server = void 0;
@@ -1340,12 +1459,17 @@ var OrbRuntime = class {
 		try {
 			this.binary = await resolveElectronBinary();
 		} catch (error) {
-			console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`);
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`dsh-orb: ${message}`);
+			this.helperError = "runtime-download";
+			this.server?.close();
+			this.server = void 0;
 			return;
 		}
 		await sessionTask;
 		if (this.halted || generation !== this.generation) return;
-		await mkdir(dshHomePath("dsh-orb", "helper-data"), { recursive: true });
+		this.userData = helperDataDirectory(this.store.dir);
+		await mkdir(this.userData, { recursive: true });
 		this.launch();
 	}
 	/**
@@ -1363,6 +1487,7 @@ var OrbRuntime = class {
 	halt() {
 		this.generation += 1;
 		this.halted = true;
+		this.pendingStart = false;
 		if (this.retry) clearTimeout(this.retry);
 		this.retry = void 0;
 		this.stopWatch();
@@ -1600,14 +1725,21 @@ var OrbRuntime = class {
 	}
 	watch() {
 		if (!this.timer) this.timer = setInterval(() => this.drain(), 400);
+		this.armIdle();
+	}
+	/** Warn after 3 quiet minutes, but keep polling until the session goes idle. */
+	armIdle() {
 		if (this.giveUp) clearTimeout(this.giveUp);
 		this.giveUp = setTimeout(() => {
+			if (!this.turnRunning) return;
 			if (this.pending) {
-				this.watch();
+				this.armIdle();
 				return;
 			}
-			this.status("等待超时");
-			this.finishTurn();
+			if (!this.idleWarned) {
+				this.idleWarned = true;
+				this.status("等待超时");
+			}
 		}, 18e4);
 	}
 	stopWatch() {
@@ -1627,15 +1759,21 @@ var OrbRuntime = class {
 			return;
 		}
 		this.missingLogged = false;
+		let fresh = false;
 		try {
 			for (const event of session.snapshotEvents()) {
 				const seq = Number(event.seq);
 				if (seq <= this.watermark) continue;
 				this.watermark = seq;
+				fresh = true;
 				this.consume(event.type, event.data, seq);
 			}
 		} catch (error) {
 			console.error(`dsh-orb: transcript read failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (fresh && this.turnRunning) {
+			this.idleWarned = false;
+			this.armIdle();
 		}
 	}
 	consume(type, data, seq) {
@@ -1756,6 +1894,7 @@ var OrbRuntime = class {
 	}
 	finishTurn() {
 		this.turnRunning = false;
+		this.idleWarned = false;
 		this.selection.setSessionRunning(false);
 		for (const key of [...this.blockOrder]) {
 			const item = this.blocks.get(key);
@@ -1880,7 +2019,7 @@ var OrbRuntime = class {
 	launch() {
 		if (this.halted || !this.binary) return;
 		const generation = this.generation;
-		const userData = dshHomePath("dsh-orb", "helper-data");
+		const userData = this.userData || helperDataDirectory(this.store.dir);
 		const env = {
 			...process.env,
 			DSH_ORB_TOKEN: this.token,
@@ -1899,6 +2038,9 @@ var OrbRuntime = class {
 		});
 		this.child = child;
 		console.error(`dsh-orb: helper started pid ${child.pid ?? "unknown"}`);
+		setTimeout(() => {
+			if (this.child === child) this.failures = 0;
+		}, 6e4).unref();
 		const token = this.token;
 		const log = (chunk) => {
 			for (const line of chunk.split("\n")) {
@@ -1917,6 +2059,7 @@ var OrbRuntime = class {
 			if (this.child === child) this.child = void 0;
 			this.failures += 1;
 			if (this.failures > 3) {
+				this.helperError = "helper-exited";
 				console.error("dsh-orb: helper exited too many times; ball stays hidden");
 				return;
 			}
@@ -1962,6 +2105,7 @@ var OrbRuntime = class {
 			background: models.background,
 			selectionEnabled: this.store.selectionEnabled(),
 			millifractionEnabled: this.store.millifractionEnabled(),
+			openMain: isDesktopHost(),
 			catalog
 		});
 		this.broadcast({
@@ -1992,8 +2136,13 @@ var OrbRuntime = class {
 	async setBallEnabled(enabled) {
 		this.store.setBallEnabled(enabled);
 		if (process.platform === "linux") return;
-		if (enabled) await this.start();
-		else this.halt();
+		if (enabled) {
+			this.start().catch((error) => {
+				console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`);
+			});
+			return;
+		}
+		this.halt();
 	}
 	onControl(message) {
 		const record = asRecord(message);
@@ -2008,50 +2157,60 @@ var OrbRuntime = class {
 			return;
 		}
 		if (record.type === "history") {
-			this.sendHistory();
+			this.run("history", () => this.sendHistory());
 			return;
 		}
 		if (record.type === "open" && typeof record.sessionId === "string") {
-			this.openSession(record.sessionId);
+			this.run("open", () => this.openSession(record.sessionId));
 			return;
 		}
 		if (record.type === "new") {
-			this.newSession();
+			this.run("new", () => this.newSession());
 			return;
 		}
-		if (record.type === "permission" && isPermissionPreset(record.preset)) {
-			this.setPermission(record.preset);
+		const preset = record.preset;
+		if (record.type === "permission" && isPermissionPreset(preset)) {
+			this.run("permission", () => this.setPermission(preset));
 			return;
 		}
 		if (record.type === "stop") {
-			this.stopTurn();
+			this.run("stop", () => this.stopTurn());
 			return;
 		}
 		if (record.type === "menu") {
-			this.publishChrome();
+			this.run("menu", () => this.publishChrome());
 			return;
 		}
-		if (record.type === "set-overlay" && isAgentModelSelection(record.selection)) {
-			this.setOverlayModel(record.selection);
+		const selection = record.selection;
+		if (record.type === "set-overlay" && isAgentModelSelection(selection)) {
+			this.run("overlay-model", () => this.setOverlayModel(selection));
 			return;
 		}
-		if (record.type === "set-background" && isAgentModelSelection(record.selection)) {
-			this.setBackgroundModel(record.selection);
+		if (record.type === "set-background" && isAgentModelSelection(selection)) {
+			this.run("background-model", () => this.setBackgroundModel(selection));
 			return;
 		}
 		if (record.type === "set-selection" && typeof record.enabled === "boolean") {
-			this.setSelectionEnabled(record.enabled);
+			this.run("selection", () => this.setSelectionEnabled(record.enabled === true));
 			return;
 		}
 		if (record.type === "set-millifraction" && typeof record.enabled === "boolean") {
-			this.setMillifractionEnabled(record.enabled);
+			this.run("millifraction", () => this.setMillifractionEnabled(record.enabled === true));
 			return;
 		}
 		if (record.type === "disable") {
-			this.setBallEnabled(false);
+			this.run("disable", () => this.setBallEnabled(false));
 			return;
 		}
-		if (record.type === "open-main") this.openMain();
+		if (record.type === "open-main") this.run("open-main", () => this.openMain());
+	}
+	/** Keep a failed ball action inside this plugin. An unhandled rejection exits the official host. */
+	run(label, task) {
+		task().catch((error) => {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`dsh-orb: ${label} failed: ${message}`);
+			this.status(message);
+		});
 	}
 	async setPermission(preset) {
 		this.store.setPermission(preset);
@@ -2191,23 +2350,26 @@ var OrbRuntime = class {
 	async applyOverlayQuiet(sessionId) {
 		const selection = this.store.models().overlay;
 		try {
-			await this.ctx.sessionController.selectModel({
+			await selectModelKeepDefault(this.ctx, {
 				sessionId,
 				provider: selection.provider,
 				model: selection.model,
-				...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort },
-				saveAsDefault: false
+				...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort }
 			});
 		} catch (error) {
 			console.error(`dsh-orb: overlay model failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	openMain() {
-		openMainWindow(this.ctx).catch(() => {
-			console.error("dsh-orb: could not open the main window");
-		});
+	async openMain() {
+		if (!isDesktopHost()) return;
+		await openMainWindow(this.ctx);
 	}
 };
+/** Per-profile Chromium data so desktop and `dsh web` do not share one lock. */
+function helperDataDirectory(profileDir) {
+	const id = createHash("sha256").update(profileDir).digest("hex").slice(0, 16);
+	return dshHomePath("dsh-orb", "helper-data", id);
+}
 function helperMain() {
 	const pkg = require.resolve("@dsh-orb/helper/package.json");
 	return join(dirname(pkg), "lib", "main.js");
@@ -2359,7 +2521,8 @@ const inject = [
 	"connection",
 	"sessionController",
 	"workspaceController",
-	"sessions"
+	"sessions",
+	"agentDefaultModel"
 ];
 /**
 * Register preferences, Computer Use services, and settings routes, then start the ball.

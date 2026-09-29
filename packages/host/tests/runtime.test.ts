@@ -42,9 +42,10 @@ interface Harness {
     create: { workspaceId?: string; sessionId?: string; agentPreset?: string }[]
     prompt: { sessionId?: string; content?: { text?: string }[] }[]
     cancel: { sessionId?: string }[]
-    selectModel: { sessionId?: string; model?: string; saveAsDefault?: boolean; reasoningEffort?: string }[]
+    selectModel: { sessionId?: string; model?: string; reasoningEffort?: string; saveAsDefault?: boolean }[]
     workspace?: { path?: string }
   }
+  savedDefaults: { provider: string; model: string; reasoningEffort?: string }[]
   listItems: Row[]
   pins: { preset: string; cwd?: string }[]
   question: (
@@ -59,6 +60,8 @@ function boot(): Harness {
   const profile = mkdtempSync(join(home, 'profile-'))
   const store = new ProfileStore(profile)
   const calls: Harness['calls'] = { create: [], prompt: [], cancel: [], selectModel: [] }
+  const savedDefaults: Harness['savedDefaults'] = []
+  const previousDefault = { provider: 'deepseek-official', model: 'deepseek-v4', reasoningEffort: 'high' }
   const sessions = new Map<string, { events: EventRow[]; header: { cwd: string; agentPreset: string } }>()
   const pins: Harness['pins'] = []
   const listItems: Row[] = []
@@ -133,6 +136,12 @@ function boot(): Harness {
         return { snapshotEvents: () => row.events, header: row.header }
       },
     },
+    agentDefaultModel: {
+      currentSelection: () => previousDefault,
+      async saveSelection(selection: Harness['savedDefaults'][number]) {
+        savedDefaults.push(selection)
+      },
+    },
     effect() {},
     get(name: string) {
       if (name === 'sessions') return ctx.sessions
@@ -164,6 +173,7 @@ function boot(): Harness {
     store,
     profile,
     calls,
+    savedDefaults,
     listItems,
     pins,
     get question() { return question },
@@ -269,7 +279,12 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.equal(harness.calls.create[0]?.sessionId, undefined)
       assert.deepEqual(Object.keys(harness.calls.workspace ?? {}), ['path'])
       assert.equal(harness.calls.workspace?.path, orb)
-      assert.equal(harness.calls.selectModel[0]?.saveAsDefault, false)
+      assert.equal(harness.calls.selectModel[0]?.saveAsDefault, undefined)
+      assert.deepEqual(harness.savedDefaults.at(-1), {
+        provider: 'deepseek-official',
+        model: 'deepseek-v4',
+        reasoningEffort: 'high',
+      })
       assert.equal(harness.calls.selectModel[0]?.sessionId, session.sessionId)
       assert.equal(harness.calls.selectModel[0]?.model, 'deepseek-flash')
       assert.equal(harness.calls.selectModel[0]?.reasoningEffort, 'max')
@@ -288,7 +303,8 @@ describe('ball control socket', { concurrency: 1 }, () => {
       await waitFor(() => harness.calls.selectModel.length > selected)
       assert.equal(harness.calls.selectModel.at(-1)?.model, 'deepseek-pro')
       assert.equal(harness.calls.selectModel.at(-1)?.reasoningEffort, 'high')
-      assert.equal(harness.calls.selectModel.at(-1)?.saveAsDefault, false)
+      assert.equal(harness.calls.selectModel.at(-1)?.saveAsDefault, undefined)
+      assert.equal(harness.savedDefaults.at(-1)?.model, 'deepseek-v4')
       assert.equal(harness.calls.selectModel.at(-1)?.sessionId, session.sessionId)
 
       client.send({ type: 'set-background', selection: { provider: 'deepseek-official', model: 'background-model' } })

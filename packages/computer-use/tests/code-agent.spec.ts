@@ -285,7 +285,13 @@ async function setup(options: {
   const created: CreateRequest[] = []
   const prompted: PromptRequest[] = []
   const selected: SelectModelRequest[] = []
+  const restored: SelectModelRequest[] = []
   const operations: string[] = []
+  const previousDefault = {
+    provider: 'deepseek-official',
+    model: 'deepseek-reasoner',
+    reasoningEffort: 'high',
+  }
   let nextId = options.createId ?? STANDARD
   const headers = new Map<string, HeaderFacts>(Object.entries(options.headers ?? {}))
   const live = options.live
@@ -374,6 +380,12 @@ async function setup(options: {
   } else if (options.workspace === 'invalid') {
     ctx.provide('workspaceRegistry', {})
   }
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => previousDefault,
+    async saveSelection(selection: SelectModelRequest) {
+      restored.push(selection)
+    },
+  })
   if (options.orbModel !== undefined) {
     const orbModel = options.orbModel
     ctx.provide('orbCodeAgentModel', {
@@ -381,7 +393,7 @@ async function setup(options: {
     })
   }
   apply(ctx)
-  return { ctx, created, prompted, selected, operations, get agentsGetCalls() { return agentsGetCalls } }
+  return { ctx, created, prompted, selected, restored, operations, get agentsGetCalls() { return agentsGetCalls } }
 }
 
 function execute(
@@ -402,7 +414,7 @@ function execute(
 describe('code_agent plugin', () => {
   it('exports loader identity without a default export', async () => {
     expect(name).toBe('tool-code-agent')
-    expect(inject).toEqual(['tools', 'sessionController'])
+    expect(inject).toEqual(['tools', 'sessionController', 'agentDefaultModel'])
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(SystemPrompt)
@@ -430,7 +442,7 @@ describe('code_agent plugin', () => {
   })
 
   it('selects the stored background model before queueing a newly created session', async () => {
-    const { ctx, selected, operations } = await setup({
+    const { ctx, selected, restored, operations } = await setup({
       orbModel: { provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'high' },
     })
     const result = await execute(ctx, { task: 'Write a Word document' })
@@ -440,13 +452,17 @@ describe('code_agent plugin', () => {
       provider: 'deepseek-official',
       model: 'deepseek-chat',
       reasoningEffort: 'high',
-      saveAsDefault: false,
+    }])
+    expect(restored).toEqual([{
+      provider: 'deepseek-official',
+      model: 'deepseek-reasoner',
+      reasoningEffort: 'high',
     }])
     expect(operations).toEqual(['selectModel', 'prompt'])
   })
 
   it('does not select a model when continuing an existing session', async () => {
-    const { ctx, created, selected, operations } = await setup({
+    const { ctx, created, selected, restored, operations } = await setup({
       orbModel: { provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'high' },
     })
     await execute(ctx, { task: 'Write a Word document' })
@@ -461,7 +477,11 @@ describe('code_agent plugin', () => {
       provider: 'deepseek-official',
       model: 'deepseek-chat',
       reasoningEffort: 'high',
-      saveAsDefault: false,
+    }])
+    expect(restored).toEqual([{
+      provider: 'deepseek-official',
+      model: 'deepseek-reasoner',
+      reasoningEffort: 'high',
     }])
     expect(operations).toEqual(['selectModel', 'prompt', 'prompt'])
   })

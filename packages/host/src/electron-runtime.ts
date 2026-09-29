@@ -4,11 +4,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { access, chmod, mkdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { access, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
@@ -37,26 +36,100 @@ export async function resolveElectronBinary(): Promise<string> {
 }
 
 async function downloadRuntime(dest: string, binary: string, marker: string): Promise<void> {
-  const fileName = assetName()
-  console.error(`dsh-orb: downloading Electron ${ELECTRON_VERSION} (${fileName})`)
-  const sums = await fetchText(`${RELEASE_BASE}/SHASUMS256.txt`)
-  const expected = expectedHash(sums, fileName)
-  const zipPath = join(tmpdir(), `dsh-orb-${fileName}`)
-  try {
-    await downloadVerifiedZip(fileName, expected, zipPath)
-    await rm(dest, { recursive: true, force: true })
-    await mkdir(dest, { recursive: true })
-    await extractZip(zipPath, dest)
-    if (process.platform === 'darwin') {
-      await spawnChecked('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', dest]).catch(() => undefined)
+  const parent = dirname(dest)
+  await mkdir(parent, { recursive: true })
+  await withDownloadLock(parent, async () => {
+    if (await exists(binary) && await exists(marker)) return
+    const fileName = assetName()
+    console.error(`dsh-orb: downloading Electron ${ELECTRON_VERSION} (${fileName})`)
+    const sums = await fetchText(`${RELEASE_BASE}/SHASUMS256.txt`)
+    const expected = expectedHash(sums, fileName)
+    const stamp = randomBytes(8).toString('hex')
+    const zipPath = join(parent, `.electron-${stamp}.zip`)
+    const staging = join(parent, `.electron-staging-${stamp}`)
+    try {
+      await downloadVerifiedZip(fileName, expected, zipPath)
+      await mkdir(staging, { recursive: true })
+      await extractZip(zipPath, staging)
+      const stagedBinary = join(staging, binaryRelative())
+      if (process.platform === 'darwin') {
+        await spawnChecked('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', staging]).catch(() => undefined)
+      }
+      await chmod(stagedBinary, 0o755)
+      await access(stagedBinary)
+      await writeFile(join(staging, `.complete-${ELECTRON_VERSION}`), `${ELECTRON_VERSION}\n`)
+      await replaceDirectory(staging, dest)
+    } finally {
+      await rm(zipPath, { force: true })
+      await rm(staging, { recursive: true, force: true })
     }
-    await chmod(binary, 0o755)
-    await access(binary)
-    await writeFile(marker, `${ELECTRON_VERSION}\n`)
-  } finally {
-    await rm(zipPath, { force: true })
+    console.error(`dsh-orb: Electron ${ELECTRON_VERSION} is ready`)
+  })
+}
+
+/** `mkdir` is the lock. A dead owner, or a lock older than 20 minutes, can be taken over. */
+async function withDownloadLock(parent: string, task: () => Promise<void>): Promise<void> {
+  const lock = join(parent, 'electron-runtime.download.lock')
+  const deadline = Date.now() + 10 * 60 * 1000
+  for (;;) {
+    try {
+      await mkdir(lock)
+      await writeFile(join(lock, 'owner'), `${process.pid}\n${Date.now()}\n`)
+      break
+    } catch (error) {
+      if (!isEexist(error)) throw error
+      if (await lockExpired(lock)) {
+        await rm(lock, { recursive: true, force: true })
+        continue
+      }
+      if (Date.now() > deadline) throw new Error('dsh-orb: Electron download is locked by another process')
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
   }
-  console.error(`dsh-orb: Electron ${ELECTRON_VERSION} is ready`)
+  try {
+    await task()
+  } finally {
+    await rm(lock, { recursive: true, force: true })
+  }
+}
+
+async function lockExpired(lock: string): Promise<boolean> {
+  try {
+    const text = await readFile(join(lock, 'owner'), 'utf8')
+    const [pidText, startedText] = text.split('\n')
+    const pid = Number(pidText)
+    const started = Number(startedText)
+    if (!Number.isInteger(pid) || pid <= 0) return true
+    if (Number.isFinite(started) && Date.now() - started > 20 * 60 * 1000) return true
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch {
+      return true
+    }
+  } catch {
+    return true
+  }
+}
+
+async function replaceDirectory(staging: string, dest: string): Promise<void> {
+  const retired = `${dest}.retired-${randomBytes(4).toString('hex')}`
+  let moved = false
+  if (await exists(dest)) {
+    await rename(dest, retired)
+    moved = true
+  }
+  try {
+    await rename(staging, dest)
+  } catch (error) {
+    if (moved) await rename(retired, dest).catch(() => undefined)
+    throw error
+  }
+  if (moved) await rm(retired, { recursive: true, force: true }).catch(() => undefined)
+}
+
+function isEexist(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'EEXIST'
 }
 
 function assetName(): string {
@@ -85,8 +158,10 @@ function expectedHash(sums: string, fileName: string): string {
   throw new Error(`dsh-orb: ${fileName} is missing from Electron ${ELECTRON_VERSION} checksums`)
 }
 
+const CURL_HTTPS = ['--proto', '=https', '--proto-redir', '=https']
+
 async function fetchText(url: string): Promise<string> {
-  const { stdout } = await run('curl', ['-fsSL', '--max-time', '60', url])
+  const { stdout } = await run('curl', ['-fsSL', ...CURL_HTTPS, '--max-time', '60', url])
   return stdout
 }
 
@@ -101,7 +176,7 @@ async function downloadVerifiedZip(fileName: string, expected: string, dest: str
     try {
       await rm(dest, { force: true })
       await run('curl', [
-        '-fsSL', '--retry', '2', '--retry-delay', '1',
+        '-fsSL', ...CURL_HTTPS, '--retry', '2', '--retry-delay', '1',
         '--speed-limit', '100000', '--speed-time', '20',
         '--max-time', '300', '-o', dest, url,
       ])

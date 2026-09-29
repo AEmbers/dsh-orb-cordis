@@ -11,6 +11,10 @@ window.__ModuleLoader__.load({
       intro: '更改写入当前配置。头像支持 GIF、PNG 或 WebP，不超过 2 MB。',
       linux: '悬浮球在 Linux 上不可用。',
       error: '无法加载悬浮球设置。',
+      saveError: '无法保存。',
+      helperFailed: '悬浮球多次退出，已经停止重试。关闭后再打开可再试一次。',
+      runtimeFailed: '悬浮球运行时没有下载成功。关闭后再打开可再试一次。',
+      selectionUnavailable: '划词不可用。',
       retry: '重试',
       ball: '启用悬浮球',
       ballDescription: '关闭后插件仍在，Computer Use 仍可在主窗口使用。',
@@ -55,6 +59,10 @@ window.__ModuleLoader__.load({
       intro: 'Changes are saved in the current profile. The avatar accepts GIF, PNG, or WebP up to 2 MB.',
       linux: 'The floating ball is not available on Linux.',
       error: 'Could not load floating-ball settings.',
+      saveError: 'Could not save.',
+      helperFailed: 'The floating ball exited too many times and stopped retrying. Turn it off and on to try again.',
+      runtimeFailed: 'The floating-ball runtime did not download. Turn it off and on to try again.',
+      selectionUnavailable: 'Selection is unavailable.',
       retry: 'Retry',
       ball: 'Enable the floating ball',
       ballDescription: 'Turning this off keeps the plugin loaded. Computer Use stays available in the main window.',
@@ -232,6 +240,9 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         void load()
+        const onFocus = () => { void load() }
+        window.addEventListener?.('focus', onFocus)
+        return () => { window.removeEventListener?.('focus', onFocus) }
       }, [])
 
       async function mutate(path, body, avatarError) {
@@ -274,7 +285,14 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dsh-orb-set' },
         h('h2', { className: 'dsh-orb-set-title' }, text.nav),
         h('p', { className: 'dsh-orb-set-intro' }, text.intro),
+        state.status === 'error' && state.error
+          ? h('p', { className: 'dsh-orb-set-error', role: 'alert' }, `${text.saveError} ${state.error}`)
+          : null,
         snap.supported ? null : h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.linux),
+        helperNotice(text, snap),
+        snap.supported && snap.selectionAvailable === false
+          ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.selectionUnavailable)
+          : null,
         h('fieldset', { className: 'dsh-orb-set-fields', disabled },
           card(text.ball, text.ballDescription, h(Toggle, {
             checked: snap.ballEnabled === true,
@@ -346,6 +364,16 @@ window.__ModuleLoader__.load({
             },
           })),
           snap.tcc && snap.tcc.applicable ? tccCard(text, snap, disabled, mutate) : null))
+    }
+
+    function helperNotice(text, snap) {
+      if (snap.helperError === 'helper-exited') {
+        return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.helperFailed)
+      }
+      if (snap.helperError === 'runtime-download') {
+        return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.runtimeFailed)
+      }
+      return null
     }
 
     function card(title, description, control) {

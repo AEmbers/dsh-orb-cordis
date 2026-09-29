@@ -4,7 +4,7 @@ import { mainWindowTarget, openCommand } from '../src/open-main.ts'
 import { isDesktopHost, isTccRight, tccAppName } from '../src/tcc.ts'
 
 describe('open main window', () => {
-  it('uses dsh://open for the desktop host and a loopback page for dsh web', () => {
+  it('uses dsh://open on the desktop host and stays disabled for dsh web', () => {
     const secret = 'token=do-not-log'
     const ctx = {
       webServer: { port: 19387 },
@@ -13,9 +13,7 @@ describe('open main window', () => {
       },
     }
     assert.equal(mainWindowTarget(ctx, true), 'dsh://open')
-    const web = mainWindowTarget(ctx, false)
-    assert.equal(web, 'http://127.0.0.1:19387/?token=do-not-log')
-    assert.match(web ?? '', /^http:\/\/127\.0\.0\.1:19387\//)
+    assert.equal(mainWindowTarget(ctx, false), undefined)
     assert.equal(mainWindowTarget({
       webServer: { port: 1 },
       connection: { authenticatedUrl: () => 'http://example.com/?token=do-not-log' },

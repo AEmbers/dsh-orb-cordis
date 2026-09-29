@@ -30,12 +30,32 @@ function isCollapsed(bounds) {
 function clampWindowOrigin(value, workOrigin, workSize, windowSize) {
 	return clamp$1(value, workOrigin - 12, workOrigin + workSize - windowSize + 12);
 }
-/** Which left or right display edge the ball already overlaps by about one fifth of its width. */
-function dockSideForBallOrigin(ball, bounds) {
+/**
+* Which outer display edge the ball already overlaps by about one fifth of its width.
+* An edge that touches another display is a seam, not a place to dock.
+*/
+function dockSideForBallOrigin(ball, bounds, displays = []) {
 	const leftOverlap = bounds.x - ball.x;
 	const rightOverlap = ball.x + 72 - (bounds.x + bounds.width);
-	if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) return "left";
-	if (rightOverlap >= DOCK_OVERLAP) return "right";
+	let side;
+	if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) side = "left";
+	else if (rightOverlap >= DOCK_OVERLAP) side = "right";
+	if (side === void 0 || edgeTouchesDisplay(side, bounds, displays)) return void 0;
+	return side;
+}
+function edgeTouchesDisplay(side, bounds, displays) {
+	const edge = side === "left" ? bounds.x : bounds.x + bounds.width;
+	for (const other of displays) {
+		if (sameRect(other, bounds)) continue;
+		const otherEdge = side === "left" ? other.x + other.width : other.x;
+		if (Math.abs(otherEdge - edge) > 8) continue;
+		const top = Math.max(bounds.y, other.y);
+		if (Math.min(bounds.y + bounds.height, other.y + other.height) > top) return true;
+	}
+	return false;
+}
+function sameRect(left, right) {
+	return left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height;
 }
 /** Hittable strip for a docked tab, flush with a display edge. */
 function dockedTabBounds(side, ballY, bounds) {
@@ -141,15 +161,17 @@ function initialWindowBounds(workArea) {
 var FloatingPlacement = class {
 	window;
 	displayAt;
+	displayBounds;
 	direction = {
 		horizontal: "left",
 		vertical: "up"
 	};
 	docked;
 	anim = 0;
-	constructor(window, displayAt) {
+	constructor(window, displayAt, displayBounds = () => []) {
 		this.window = window;
 		this.displayAt = displayAt;
+		this.displayBounds = displayBounds;
 	}
 	/** Resize between the ball and the panel while keeping the ball origin fixed. */
 	setExpanded(expanded) {
@@ -235,7 +257,7 @@ var FloatingPlacement = class {
 				y: bounds.y + 12
 			};
 			if (canDock) {
-				const side = dockSideForBallOrigin(origin, display.bounds);
+				const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds());
 				if (side) return this.snap(side, origin.y, display.bounds);
 			}
 			this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)));
@@ -389,7 +411,7 @@ function effortItems(provider, model, current, onSelect, defaultEffortLabel) {
 //#endregion
 //#region src/menu.ts
 /** Right-click menu for the ball. Model rows come from the host catalog. */
-/** Labels and actions for the ball menu. The selection switch only changes the stored preference. */
+/** Labels and actions for the ball menu. The selection checkbox writes the preference; the host starts and stops the monitor. */
 function contextMenuTemplate(state, zh, actions) {
 	const labels = {
 		empty: zh ? "没有可用的模型。" : "No models available.",
@@ -398,6 +420,7 @@ function contextMenuTemplate(state, zh, actions) {
 	return [
 		{
 			label: zh ? "打开主窗口" : "Open Main Window",
+			enabled: state.openMain,
 			click: () => {
 				actions.openMain();
 			}
@@ -827,6 +850,7 @@ let chrome = {
 	background: defaultSelection,
 	selectionEnabled: false,
 	millifractionEnabled: false,
+	openMain: false,
 	catalog: { groups: [] }
 };
 let avatarToken = 0;
@@ -869,7 +893,7 @@ app.whenReady().then(async () => {
 			bounds: display.bounds,
 			workArea: display.workArea
 		};
-	});
+	}, () => screen.getAllDisplays().map((display) => display.bounds));
 	win.webContents.on("did-finish-load", () => {
 		if (win && !win.isVisible()) win.showInactive();
 	});
@@ -1126,6 +1150,7 @@ function readChrome(value) {
 		background: selectionOr(record.background, chrome.background),
 		selectionEnabled: record.selectionEnabled === true,
 		millifractionEnabled: record.millifractionEnabled === true,
+		openMain: record.openMain === true,
 		catalog: record.catalog ?? { groups: [] }
 	};
 }

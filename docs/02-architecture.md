@@ -44,7 +44,7 @@ helper 不使用 `/Applications/DeepSeek Harness.app` 里的可执行文件。�
 
 阶段 1 可以先发一个只有 preset 的 `dsh-computer-use` bundle，用来在没有球的时候验证工具。阶段 2 把这条 preset 收进 `dsh-orb`，避免两个 bundle 插入同一个 `preset-computer-use`。用户文档只保留 `dsh plugin add dsh-orb`。
 
-`@deepseek-ai/dsh-*` 依赖钉死 `0.1.7-rc.2`。发布前确认 npm 上 `@dsh-orb` 或无 scope 的 `dsh-orb` 是否被占用；被占用就换名，文档里的职责不变。
+`@deepseek-ai/dsh-*` 依赖范围是 `>=0.1.7-rc.2 <0.3.0-0`。代码按 `0.1.7-rc.2` 编译。上限写成 `<0.3.0-0`，这样 `0.3.0-rc.1` 不会被算进兼容范围。发布前确认 npm 上 `@dsh-orb` 或无 scope 的 `dsh-orb` 是否被占用；被占用就换名，文档里的职责不变。
 
 ## 3. 从 fork 搬什么
 

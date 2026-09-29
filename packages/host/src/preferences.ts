@@ -3,7 +3,7 @@
  * Names match the desktop fork so an existing profile keeps its choices.
  */
 
-import { readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const PERMISSION_FILE = 'orb-permission.json'
@@ -173,7 +173,7 @@ export class ProfileStore {
   }
 
   writeAvatar(bytes: Uint8Array, mime: AvatarMime): void {
-    writeFileSync(join(this.dir, AVATAR_FILE), bytes)
+    writeBytes(join(this.dir, AVATAR_FILE), bytes)
     writeJson(join(this.dir, AVATAR_META_FILE), { mime })
   }
 
@@ -292,7 +292,13 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 function writeJson(file: string, value: unknown): void {
-  writeFileSync(file, `${JSON.stringify(value, undefined, 2)}\n`)
+  writeBytes(file, Buffer.from(`${JSON.stringify(value, undefined, 2)}\n`))
+}
+
+function writeBytes(file: string, bytes: Uint8Array): void {
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, bytes)
+  renameSync(tmp, file)
 }
 
 function isEnoent(error: unknown): boolean {

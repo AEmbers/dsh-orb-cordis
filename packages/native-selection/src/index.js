@@ -1,6 +1,6 @@
 /** Selection monitor. Darwin uses the prebuilt dylib; Windows uses koffi hooks. */
 
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,14 @@ export function startSelectionMonitor(handlers) {
   if (process.platform === 'darwin') return startDarwin(handlers)
   if (process.platform === 'win32') return startWindows(handlers)
   return undefined
+}
+
+/** False when this platform has no monitor, or the prebuilt dylib did not load. */
+export function selectionRuntimeAvailable() {
+  if (process.platform === 'linux') return false
+  if (process.platform === 'win32') return true
+  if (process.platform !== 'darwin') return false
+  return loadDarwin() !== undefined
 }
 
 export function promptAccessibility() {
@@ -48,7 +56,7 @@ function loadDarwin() {
   if (darwin !== undefined) return darwin || undefined
   try {
     const koffi = require('koffi')
-    const dylib = join(here, '..', 'prebuilds', `darwin-${process.arch}`, 'libmacos-selection.dylib')
+    const dylib = darwinLibrary()
     const lib = koffi.load(dylib)
     darwin = {
       start: lib.func('int32 dsh_macos_selection_start(void *callback, void *context)'),
@@ -66,6 +74,12 @@ function loadDarwin() {
     console.error(`dsh-orb: selection monitor did not load: ${error instanceof Error ? error.message : String(error)}`)
     return undefined
   }
+}
+
+function darwinLibrary() {
+  const universal = join(here, '..', 'prebuilds', 'darwin-universal', 'libmacos-selection.dylib')
+  if (existsSync(universal)) return universal
+  return join(here, '..', 'prebuilds', `darwin-${process.arch}`, 'libmacos-selection.dylib')
 }
 
 function startDarwin(handlers) {

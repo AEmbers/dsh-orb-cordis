@@ -17,6 +17,7 @@ import {
   type AgentModelSelection,
   type ProfileStore,
 } from './preferences.ts'
+import { selectionRuntimeAvailable } from '@dsh-orb/native-selection'
 import { isTccRight, type TccMonitor, type TccStatus } from './tcc.ts'
 
 const require = createRequire(import.meta.url)
@@ -49,6 +50,7 @@ export interface OrbControl {
   setSelectionEnabled(enabled: boolean): Promise<void>
   setMillifractionEnabled(enabled: boolean): Promise<void>
   setBallEnabled(enabled: boolean): Promise<void>
+  helperStatus?(): string
 }
 
 interface RouteDeps {
@@ -202,6 +204,8 @@ async function snapshot(deps: RouteDeps): Promise<{
   selectionEnabled: boolean
   millifractionEnabled: boolean
   tcc: TccStatus
+  helperError: string
+  selectionAvailable: boolean
 }> {
   const models = deps.store.models()
   const version = Math.trunc(deps.store.avatarVersion())
@@ -214,6 +218,8 @@ async function snapshot(deps: RouteDeps): Promise<{
     selectionEnabled: deps.store.selectionEnabled(),
     millifractionEnabled: deps.store.millifractionEnabled(),
     tcc: deps.tcc.status(),
+    helperError: deps.control.helperStatus?.() ?? '',
+    selectionAvailable: selectionRuntimeAvailable(),
   }
 }
 

@@ -89,7 +89,7 @@
 | Host 的 Node 模式里调用 ScreenCaptureKit 卡住 | 已知，避开 | 常规截图继续用 `screencapture`。排除窗口用 helper 的 content protection。SCK 若仍需要，只在 helper 里调用 |
 | `setContentProtection` 不能从 `screencapture` 里去掉球 | 中 | 阶段 4 用真实截图确认。失败则改由 helper 做 ScreenCaptureKit |
 | 第三方插件读不到 `ctx.webServer` / `ctx.connection` | 低 | 阶段 2 第一步打印。这两个是官方服务，web 插件一直在用 |
-| 官方 API 相对 fork 的 `0.1.7-rc.1` 有差异 | 中 | 依赖钉 `0.1.7-rc.2`，阶段 1 以编译和真机工具调用为准 |
+| 官方 API 相对 fork 的 `0.1.7-rc.1` 有差异 | 中 | 依赖范围 `>=0.1.7-rc.2 <0.3.0-0`（排除 0.3 预发布），阶段 1 以编译和真机工具调用为准 |
 | 以后官方 Electron 或 dsh 升级 | 中 | helper 锁自己的 Electron 版本。dsh 依赖随官方版本 bump |
 | 桌面插件页对「外部 npm 包 + client 插件 + 原生模块」一次装不全 | 中 | 阶段 0 用官方桌面插件页装空 bundle，阶段 2 装真包。CLI 路径不依赖这个页面 |
 | macOS 权限弹窗写着 DeepSeek Harness 或终端 | 已接受 | 球里的引导文案写明要授权的应用名 |

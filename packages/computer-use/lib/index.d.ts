@@ -278,7 +278,7 @@ declare function createPlatformBackend(platform?: NodeJS.Platform, excludedRegio
 //#endregion
 //#region src/fake.d.ts
 /** 1×1 red PNG used as the fixture desktop image. */
-declare const FAKE_DESKTOP_PNG: any;
+declare const FAKE_DESKTOP_PNG: Buffer<ArrayBuffer>;
 /** Recorded fake-desktop action for assertions. */
 type FakeDesktopAction = {
   readonly type: 'click';

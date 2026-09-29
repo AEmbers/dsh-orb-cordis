@@ -56,7 +56,6 @@ interface OrbContext {
       readonly provider: string;
       readonly model: string;
       readonly reasoningEffort?: string;
-      readonly saveAsDefault: boolean;
     }): Promise<unknown>;
     cancel(request: {
       readonly sessionId: string;
@@ -75,6 +74,18 @@ interface OrbContext {
         readonly agentPreset?: string;
       };
     } | undefined;
+  };
+  readonly agentDefaultModel?: {
+    currentSelection(): {
+      readonly provider: string;
+      readonly model: string;
+      readonly reasoningEffort?: string;
+    };
+    saveSelection(selection: {
+      readonly provider: string;
+      readonly model: string;
+      readonly reasoningEffort?: string;
+    }): Promise<void>;
   };
   effect(execute: () => void | (() => void)): void;
   get(name: string): unknown;

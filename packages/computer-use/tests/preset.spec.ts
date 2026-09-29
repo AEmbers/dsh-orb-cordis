@@ -23,7 +23,7 @@ const GUI_TOOLS = [
 ]
 
 const SOURCE_OVERLAY = fileURLToPath(new URL('../cordis.source.patch.yml', import.meta.url))
-const BUILT_OVERLAY = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
+const BUILT_OVERLAY = fileURLToPath(new URL('../../bundle/cordis.patch.yml', import.meta.url))
 const COMPOSITION = fileURLToPath(new URL('../presets/computer-use/agent.cordis.yml', import.meta.url))
 const homes: string[] = []
 const contexts: Context[] = []
@@ -73,7 +73,8 @@ describe('computer-use overlay and extra root', () => {
     const built = await readFile(BUILT_OVERLAY, 'utf8')
     expect(built).toContain('id: preset-computer-use')
     expect(built).toContain('name: \'@deepseek-ai/dsh-agent-preset\'')
-    expect(built).toContain('name: \'@deepseek-ai/dsh-experimental-tool-computer-use\'')
+    expect(built).toContain('name: \'@dsh-orb/computer-use\'')
+    expect(built).toContain('name: \'@dsh-orb/computer-use/code-agent\'')
     expect(built).not.toContain('computer-use-preset-root')
   })
 

@@ -3,7 +3,7 @@
  * The helper never calls the official HTTP API. Messages arrive here and this process calls the host services.
  */
 
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { createRequire } from 'node:module'
@@ -13,6 +13,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { normalizeCatalog } from './catalog.ts'
 import { resolveElectronBinary } from './electron-runtime.ts'
 import { openMainWindow } from './open-main.ts'
+import { isDesktopHost } from './tcc.ts'
 import {
   isAgentModelSelection,
   isPermissionPreset,
@@ -29,6 +30,7 @@ import {
   type SelectionStarter,
 } from './selection.ts'
 import { pinSessionId } from './services.ts'
+import { selectModelKeepDefault } from './select-model.ts'
 
 const require = createRequire(import.meta.url)
 
@@ -71,7 +73,6 @@ export interface OrbContext {
       readonly provider: string
       readonly model: string
       readonly reasoningEffort?: string
-      readonly saveAsDefault: boolean
     }): Promise<unknown>
     cancel(request: { readonly sessionId: string }): Promise<unknown>
     modelCatalog(): unknown
@@ -81,6 +82,18 @@ export interface OrbContext {
       snapshotEvents(): readonly { readonly type: string; readonly seq: number; readonly data: unknown }[]
       readonly header?: { readonly cwd?: string; readonly agentPreset?: string }
     } | undefined
+  }
+  readonly agentDefaultModel?: {
+    currentSelection(): {
+      readonly provider: string
+      readonly model: string
+      readonly reasoningEffort?: string
+    }
+    saveSelection(selection: {
+      readonly provider: string
+      readonly model: string
+      readonly reasoningEffort?: string
+    }): Promise<void>
   }
   effect(execute: () => void | (() => void)): void
   get(name: string): unknown
@@ -154,6 +167,10 @@ export class OrbRuntime {
   private workspaceTask: Promise<string> | undefined
   private retry: ReturnType<typeof setTimeout> | undefined
   private opening = false
+  private pendingStart = false
+  private helperError: string | undefined
+  private userData = ''
+  private idleWarned = false
   private sessionId: string | undefined
   private sessionError: string | undefined
   private creating: Promise<string> | undefined
@@ -201,21 +218,38 @@ export class OrbRuntime {
   /** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
   async start(): Promise<void> {
     if (process.platform === 'linux') return
-    if (this.opening || (!this.halted && this.server)) return
-    this.opening = true
     this.halted = false
     this.failures = 0
+    this.helperError = undefined
+    if (this.child !== undefined && this.child.exitCode === null && this.child.signalCode === null && this.server) return
+    if (this.retry) clearTimeout(this.retry)
+    this.retry = undefined
+    if (this.opening) {
+      this.generation += 1
+      this.pendingStart = true
+      return
+    }
+    this.opening = true
     this.generation += 1
     const generation = this.generation
     try {
       await this.begin(generation)
     } finally {
       this.opening = false
+      if (this.pendingStart) {
+        this.pendingStart = false
+        if (!this.halted) await this.start()
+      }
     }
   }
 
+  /** Short code the settings page can show after the helper gives up. */
+  helperStatus(): string {
+    return this.helperError ?? ''
+  }
+
   private async begin(generation: number): Promise<void> {
-    await this.listen()
+    if (!this.server) await this.listen()
     if (this.halted || generation !== this.generation) {
       this.server?.close()
       this.server = undefined
@@ -229,12 +263,17 @@ export class OrbRuntime {
     try {
       this.binary = await resolveElectronBinary()
     } catch (error) {
-      console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`dsh-orb: ${message}`)
+      this.helperError = 'runtime-download'
+      this.server?.close()
+      this.server = undefined
       return
     }
     await sessionTask
     if (this.halted || generation !== this.generation) return
-    await mkdir(dshHomePath('dsh-orb', 'helper-data'), { recursive: true })
+    this.userData = helperDataDirectory(this.store.dir)
+    await mkdir(this.userData, { recursive: true })
     this.launch()
   }
 
@@ -251,6 +290,7 @@ export class OrbRuntime {
   halt(): void {
     this.generation += 1
     this.halted = true
+    this.pendingStart = false
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
     this.stopWatch()
@@ -491,14 +531,22 @@ export class OrbRuntime {
 
   private watch(): void {
     if (!this.timer) this.timer = setInterval(() => this.drain(), 400)
+    this.armIdle()
+  }
+
+  /** Warn after 3 quiet minutes, but keep polling until the session goes idle. */
+  private armIdle(): void {
     if (this.giveUp) clearTimeout(this.giveUp)
     this.giveUp = setTimeout(() => {
+      if (!this.turnRunning) return
       if (this.pending) {
-        this.watch()
+        this.armIdle()
         return
       }
-      this.status('等待超时')
-      this.finishTurn()
+      if (!this.idleWarned) {
+        this.idleWarned = true
+        this.status('等待超时')
+      }
     }, 180_000)
   }
 
@@ -520,15 +568,21 @@ export class OrbRuntime {
       return
     }
     this.missingLogged = false
+    let fresh = false
     try {
       for (const event of session.snapshotEvents()) {
         const seq = Number(event.seq)
         if (seq <= this.watermark) continue
         this.watermark = seq
+        fresh = true
         this.consume(event.type, event.data, seq)
       }
     } catch (error) {
       console.error(`dsh-orb: transcript read failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (fresh && this.turnRunning) {
+      this.idleWarned = false
+      this.armIdle()
     }
   }
 
@@ -659,6 +713,7 @@ export class OrbRuntime {
 
   private finishTurn(): void {
     this.turnRunning = false
+    this.idleWarned = false
     this.selection.setSessionRunning(false)
     for (const key of [...this.blockOrder]) {
       const item = this.blocks.get(key)
@@ -771,8 +826,8 @@ export class OrbRuntime {
   private launch(): void {
     if (this.halted || !this.binary) return
     const generation = this.generation
-    const userData = dshHomePath('dsh-orb', 'helper-data')
-    const env = {
+    const userData = this.userData || helperDataDirectory(this.store.dir)
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       DSH_ORB_TOKEN: this.token,
       DSH_ORB_SOCKET: `127.0.0.1:${this.port}`,
@@ -786,6 +841,10 @@ export class OrbRuntime {
     })
     this.child = child
     console.error(`dsh-orb: helper started pid ${child.pid ?? 'unknown'}`)
+    const stable = setTimeout(() => {
+      if (this.child === child) this.failures = 0
+    }, 60_000)
+    stable.unref()
     const token = this.token
     const log = (chunk: string) => {
       for (const line of chunk.split('\n')) {
@@ -804,6 +863,7 @@ export class OrbRuntime {
       if (this.child === child) this.child = undefined
       this.failures += 1
       if (this.failures > 3) {
+        this.helperError = 'helper-exited'
         console.error('dsh-orb: helper exited too many times; ball stays hidden')
         return
       }
@@ -852,6 +912,7 @@ export class OrbRuntime {
       background: models.background,
       selectionEnabled: this.store.selectionEnabled(),
       millifractionEnabled: this.store.millifractionEnabled(),
+      openMain: isDesktopHost(),
       catalog,
     })
     this.broadcast({ type: 'avatar', version: Math.trunc(this.store.avatarVersion()) })
@@ -884,8 +945,13 @@ export class OrbRuntime {
   async setBallEnabled(enabled: boolean): Promise<void> {
     this.store.setBallEnabled(enabled)
     if (process.platform === 'linux') return
-    if (enabled) await this.start()
-    else this.halt()
+    if (enabled) {
+      void this.start().catch((error: unknown) => {
+        console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      return
+    }
+    this.halt()
   }
 
   private onControl(message: unknown): void {
@@ -901,50 +967,61 @@ export class OrbRuntime {
       return
     }
     if (record.type === 'history') {
-      void this.sendHistory()
+      this.run('history', () => this.sendHistory())
       return
     }
     if (record.type === 'open' && typeof record.sessionId === 'string') {
-      void this.openSession(record.sessionId)
+      this.run('open', () => this.openSession(record.sessionId as string))
       return
     }
     if (record.type === 'new') {
-      void this.newSession()
+      this.run('new', () => this.newSession())
       return
     }
-    if (record.type === 'permission' && isPermissionPreset(record.preset)) {
-      void this.setPermission(record.preset)
+    const preset = record.preset
+    if (record.type === 'permission' && isPermissionPreset(preset)) {
+      this.run('permission', () => this.setPermission(preset))
       return
     }
     if (record.type === 'stop') {
-      void this.stopTurn()
+      this.run('stop', () => this.stopTurn())
       return
     }
     if (record.type === 'menu') {
-      void this.publishChrome()
+      this.run('menu', () => this.publishChrome())
       return
     }
-    if (record.type === 'set-overlay' && isAgentModelSelection(record.selection)) {
-      void this.setOverlayModel(record.selection)
+    const selection = record.selection
+    if (record.type === 'set-overlay' && isAgentModelSelection(selection)) {
+      this.run('overlay-model', () => this.setOverlayModel(selection))
       return
     }
-    if (record.type === 'set-background' && isAgentModelSelection(record.selection)) {
-      void this.setBackgroundModel(record.selection)
+    if (record.type === 'set-background' && isAgentModelSelection(selection)) {
+      this.run('background-model', () => this.setBackgroundModel(selection))
       return
     }
     if (record.type === 'set-selection' && typeof record.enabled === 'boolean') {
-      void this.setSelectionEnabled(record.enabled)
+      this.run('selection', () => this.setSelectionEnabled(record.enabled === true))
       return
     }
     if (record.type === 'set-millifraction' && typeof record.enabled === 'boolean') {
-      void this.setMillifractionEnabled(record.enabled)
+      this.run('millifraction', () => this.setMillifractionEnabled(record.enabled === true))
       return
     }
     if (record.type === 'disable') {
-      void this.setBallEnabled(false)
+      this.run('disable', () => this.setBallEnabled(false))
       return
     }
-    if (record.type === 'open-main') void this.openMain()
+    if (record.type === 'open-main') this.run('open-main', () => this.openMain())
+  }
+
+  /** Keep a failed ball action inside this plugin. An unhandled rejection exits the official host. */
+  private run(label: string, task: () => Promise<void>): void {
+    void task().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`dsh-orb: ${label} failed: ${message}`)
+      this.status(message)
+    })
   }
 
   private async setPermission(preset: PermissionPreset): Promise<void> {
@@ -1013,7 +1090,7 @@ export class OrbRuntime {
   private async historyRecords(): Promise<{ sessionId: string; title: string; running: boolean }[]> {
     try {
       const listed = await this.ctx.sessionController.list({}, AbortSignal.timeout(15_000))
-      const rows = Array.isArray(listed) ? listed : listed.items ?? []
+      const rows = Array.isArray(listed) ? listed : (listed as { items?: readonly unknown[] }).items ?? []
       const orb = resolve(dshHomePath('dsh_orb'))
       const items: { sessionId: string; title: string; running: boolean }[] = []
       for (const row of rows) {
@@ -1082,23 +1159,27 @@ export class OrbRuntime {
   private async applyOverlayQuiet(sessionId: string): Promise<void> {
     const selection = this.store.models().overlay
     try {
-      await this.ctx.sessionController.selectModel({
+      await selectModelKeepDefault(this.ctx, {
         sessionId,
         provider: selection.provider,
         model: selection.model,
         ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
-        saveAsDefault: false,
       })
     } catch (error) {
       console.error(`dsh-orb: overlay model failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  private openMain(): void {
-    void openMainWindow(this.ctx).catch(() => {
-      console.error('dsh-orb: could not open the main window')
-    })
+  private async openMain(): Promise<void> {
+    if (!isDesktopHost()) return
+    await openMainWindow(this.ctx)
   }
+}
+
+/** Per-profile Chromium data so desktop and `dsh web` do not share one lock. */
+function helperDataDirectory(profileDir: string): string {
+  const id = createHash('sha256').update(profileDir).digest('hex').slice(0, 16)
+  return dshHomePath('dsh-orb', 'helper-data', id)
 }
 
 function helperMain(): string {

@@ -15,6 +15,7 @@ declare module 'electron' {
     send(channel: string, ...args: unknown[]): void
     setWindowOpenHandler(handler: () => { action: 'deny' }): void
     on(event: 'will-navigate' | 'did-finish-load' | 'context-menu', listener: (event: { preventDefault(): void }, params?: { isEditable?: boolean }) => void): void
+    executeJavaScript(code: string): Promise<unknown>
   }
 
   interface BrowserWindow {
@@ -25,8 +26,12 @@ declare module 'electron' {
     setBounds(bounds: Rectangle): void
     getBounds(): Rectangle
     isVisible(): boolean
+    isDestroyed(): boolean
     showInactive(): void
+    hide(): void
+    setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void
     once(event: 'ready-to-show', listener: () => void): void
+    on(event: 'closed', listener: () => void): void
     webContents: WebContents
   }
 
@@ -98,7 +103,9 @@ declare module 'electron' {
 
   export const screen: {
     getPrimaryDisplay(): Display
+    getAllDisplays(): Display[]
     getDisplayNearestPoint(point: { x: number; y: number }): Display
+    screenToDipRect(window: null, rect: Rectangle): Rectangle
   }
 
   export const ipcMain: {

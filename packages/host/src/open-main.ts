@@ -11,10 +11,14 @@ interface OpenContext {
   readonly connection: { authenticatedUrl(baseUrl: string): string }
 }
 
-/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
-export function mainWindowTarget(ctx: OpenContext, desktop = isDesktopHost()): string | undefined {
+/**
+ * Desktop uses the app's `dsh://open` protocol.
+ * `dsh web` has no main window, so the menu item stays disabled and this returns undefined.
+ * The credentialed loopback URL is never passed to `open` or `cmd`.
+ */
+export function mainWindowTarget(_ctx: OpenContext, desktop = isDesktopHost()): string | undefined {
   if (desktop) return 'dsh://open'
-  return localPage(ctx)
+  return undefined
 }
 
 /** Command used to focus that window. The target is never logged. */
@@ -23,32 +27,11 @@ export function openCommand(target: string, platform: NodeJS.Platform = process.
   return { command: 'open', args: [target] }
 }
 
-/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
+/** Focus the desktop main window. Does nothing when this host is `dsh web`. */
 export async function openMainWindow(ctx: OpenContext): Promise<void> {
   const target = mainWindowTarget(ctx)
   if (target === undefined) return
   await spawnOpen(target)
-}
-
-function localPage(ctx: OpenContext): string | undefined {
-  let url: string
-  try {
-    url = ctx.connection.authenticatedUrl(`http://127.0.0.1:${ctx.webServer.port}`)
-  } catch {
-    console.error('dsh-orb: main window URL is unavailable')
-    return undefined
-  }
-  try {
-    const hostname = new URL(url).hostname
-    if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '[::1]') {
-      console.error('dsh-orb: main window URL is not loopback')
-      return undefined
-    }
-  } catch {
-    console.error('dsh-orb: main window URL is unavailable')
-    return undefined
-  }
-  return url
 }
 
 function spawnOpen(target: string): Promise<void> {
