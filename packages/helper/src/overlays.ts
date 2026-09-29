@@ -277,7 +277,9 @@ function openFrame(): BrowserWindow {
 }
 
 function protect(created: BrowserWindow, level: 'screen-saver' | 'floating'): void {
-  created.setContentProtection(true)
+  // macOS 上开启内容保护会把窗口从截图/录屏里抹掉（NSWindowSharingNone），
+  // 原版悬浮球只在 Windows 采集期间开启，这里保持一致。
+  if (process.platform === 'win32') created.setContentProtection(true)
   created.setAlwaysOnTop(true, level)
   if (process.platform === 'darwin') {
     created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })

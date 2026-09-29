@@ -833,7 +833,7 @@ function openFrame() {
 	return created;
 }
 function protect(created, level) {
-	created.setContentProtection(true);
+	if (process.platform === "win32") created.setContentProtection(true);
 	created.setAlwaysOnTop(true, level);
 	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
 		visibleOnFullScreen: true,
@@ -1036,7 +1036,7 @@ function openWindow() {
 			sandbox: true
 		}
 	});
-	created.setContentProtection(true);
+	if (process.platform === "win32") created.setContentProtection(true);
 	denyWindowPermissions(created);
 	created.setAlwaysOnTop(true, "screen-saver");
 	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
@@ -1060,7 +1060,7 @@ function openWindow() {
 	});
 	created.once("ready-to-show", () => {
 		created.showInactive();
-		created.setContentProtection(true);
+		if (process.platform === "win32") created.setContentProtection(true);
 		const shown = created.getBounds();
 		console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`);
 	});

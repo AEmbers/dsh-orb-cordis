@@ -201,7 +201,7 @@ function openWindow(): BrowserWindow {
       sandbox: true,
     },
   })
-  created.setContentProtection(true)
+  if (process.platform === 'win32') created.setContentProtection(true)
   denyWindowPermissions(created)
   created.setAlwaysOnTop(true, 'screen-saver')
   if (process.platform === 'darwin') {
@@ -222,7 +222,7 @@ function openWindow(): BrowserWindow {
   })
   created.once('ready-to-show', () => {
     created.showInactive()
-    created.setContentProtection(true)
+    if (process.platform === 'win32') created.setContentProtection(true)
     const shown = created.getBounds()
     console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`)
   })
