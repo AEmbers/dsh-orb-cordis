@@ -203,7 +203,13 @@ export class OrbRuntime {
   private giveUp: ReturnType<typeof setTimeout> | undefined
   private readonly dirty = new Set<string>()
   private dirtyTimer: ReturnType<typeof setTimeout> | undefined
-  private readonly liveAttempts = new Map<string, string>()
+  /** Chunk frames carry no turn/step; only the attempt's start frame does. */
+  private readonly attemptPositions = new Map<string, { turn: number; step: number }>()
+  private readonly lastAttemptByStep = new Map<string, string>()
+  /** Transient block keys one streaming step created, in creation order. */
+  private readonly stepBlocks = new Map<string, string[]>()
+  private liveStep: string | undefined
+  private orphanFrameLogged = false
   private helperPid: number | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
   private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
@@ -265,31 +271,41 @@ export class OrbRuntime {
     if (session?.id !== this.sessionId) return
     const frame = asRecord(record?.frame)
     if (!frame) return
-    const turn = numberOf(frame.turn)
-    const step = numberOf(frame.step)
+    const attemptId = typeof frame.attemptId === 'string' ? frame.attemptId : ''
     if (frame.type === 'start') {
-      const attemptId = typeof frame.attemptId === 'string' ? frame.attemptId : ''
+      if (attemptId === '') return
+      const turn = numberOf(frame.turn)
+      const step = numberOf(frame.step)
+      this.attemptPositions.set(attemptId, { turn, step })
       const stepKey = `${turn}:${step}`
-      if (attemptId !== '' && this.liveAttempts.get(stepKey) !== attemptId) {
-        this.liveAttempts.set(stepKey, attemptId)
-        this.rewindLiveStep(turn, step)
-      }
+      const previous = this.lastAttemptByStep.get(stepKey)
+      this.lastAttemptByStep.set(stepKey, attemptId)
+      if (previous !== undefined && previous !== attemptId) this.rewindLiveStep(turn, step)
+      return
+    }
+    if (frame.type === 'end') {
+      this.attemptPositions.delete(attemptId)
       return
     }
     if (frame.type !== 'chunk') return
+    const position = this.attemptPositions.get(attemptId)
+    if (position === undefined) {
+      if (!this.orphanFrameLogged) {
+        this.orphanFrameLogged = true
+        console.error('dsh-orb: assistant stream chunk arrived without its start frame')
+      }
+      return
+    }
     if (!asRecord(frame.chunk)) return
-    this.onChunk({ turn, step, chunk: frame.chunk })
+    this.onChunk({ turn: position.turn, step: position.step, chunk: frame.chunk })
   }
 
-  /** A retried attempt restarts the same block keys; drop the abandoned partials so appends rebuild cleanly. */
+  /** A new attempt supersedes the dead one: drop its transient blocks so the retry streams into a clean slate. */
   private rewindLiveStep(turn: number, step: number): void {
-    const prefix = `b:${turn}:${step}:`
-    for (const key of [...this.blockOrder]) {
-      if (!key.startsWith(prefix)) continue
-      const previous = this.blocks.get(key)
-      if (previous?.running !== true) continue
-      this.blocks.set(key, { ...previous, text: '' })
-    }
+    const tracked = this.stepBlocks.get(`${turn}:${step}`)
+    if (!tracked) return
+    this.stepBlocks.delete(`${turn}:${step}`)
+    for (const key of tracked) this.dropBlock(key)
   }
 
   /** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
@@ -742,94 +758,105 @@ export class OrbRuntime {
     const step = numberOf(record.step)
     const index = numberOf(chunk.index)
     const key = `b:${turn}:${step}:${index}`
-    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-      this.block(key, 'assistant', chunk.text, true, 'append')
-      return
+    this.liveStep = `${turn}:${step}`
+    try {
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+        this.block(key, 'assistant', chunk.text, true, 'append')
+        return
+      }
+      if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
+        this.block(key, 'reasoning', chunk.text, true, 'append')
+        return
+      }
+      if (chunk.type === 'tool-call-delta') {
+        const name = typeof chunk.name === 'string' ? chunk.name : ''
+        if (!name) return
+        const id = typeof chunk.id === 'string' ? chunk.id : ''
+        const delta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+        const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
+        const previous = this.blocks.get(toolKey)
+        this.block(toolKey, 'tool', name, true, 'set', {
+          args: clip(`${previous?.detail?.args ?? ''}${delta}`, 4000),
+        })
+        return
+      }
+      if (chunk.type === 'block-end') this.applyContent(key, chunk.block, false)
+    } finally {
+      this.liveStep = undefined
     }
-    if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string') {
-      this.block(key, 'reasoning', chunk.text, true, 'append')
-      return
-    }
-    if (chunk.type === 'tool-call-delta') {
-      const name = typeof chunk.name === 'string' ? chunk.name : ''
-      if (!name) return
-      const id = typeof chunk.id === 'string' ? chunk.id : ''
-      const delta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
-      const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
-      const previous = this.blocks.get(key)
-      this.block(key, 'tool', name, true, 'set', {
-        args: clip(`${previous?.detail?.args ?? ''}${delta}`, 4000),
-      })
-      return
-    }
-    if (chunk.type === 'block-end') this.applyContent(key, chunk.block, turn, step, index, false)
   }
 
+  /**
+   * Settle one assistant message like Harness settleAssistant: the transient
+   * streamed blocks are consumed in place (kind + order) and whatever the
+   * message did not claim is dropped, so no stale copy can survive the fold.
+   */
   private onAssistant(data: unknown): void {
     const record = asRecord(data)
     if (!record) return
     const turn = numberOf(record.turn)
     const step = numberOf(record.step)
     if (record.interrupted === true) this.turnInterrupted = true
-    if (Array.isArray(record.stream)) {
-      for (const item of record.stream) this.foldStream(item, turn, step)
-    }
     const message = asRecord(record.message)
     const content = message?.content
-    if (typeof content === 'string') {
-      this.block(`b:${turn}:${step}:0`, 'assistant', content, false, 'set')
-      return
+    const parts: unknown[] = typeof content === 'string'
+      ? [{ type: 'text', text: content }]
+      : Array.isArray(content) ? content : []
+    const transient = this.stepBlocks.get(`${turn}:${step}`) ?? []
+    this.stepBlocks.delete(`${turn}:${step}`)
+    let cursor = 0
+    for (const [index, part] of parts.entries()) {
+      const wanted = partKind(asRecord(part))
+      let key: string | undefined
+      if (wanted !== undefined) {
+        while (cursor < transient.length) {
+          const candidate = transient[cursor]
+          cursor += 1
+          if (this.blocks.get(candidate)?.kind === wanted) {
+            key = candidate
+            break
+          }
+          this.dropBlock(candidate)
+        }
+      }
+      key ??= `b:${turn}:${step}:${index}`
+      const written = this.applyContent(key, part, false)
+      if (written !== key) this.dropBlock(key)
     }
-    if (!Array.isArray(content)) return
-    content.forEach((part, index) => {
-      this.applyContent(`b:${turn}:${step}:${index}`, part, turn, step, index, false)
-    })
+    while (cursor < transient.length) {
+      this.dropBlock(transient[cursor])
+      cursor += 1
+    }
   }
 
-  private foldStream(item: unknown, turn: number, step: number): void {
-    const record = asRecord(item)
-    if (!record) return
-    if (record.type === 'chunk') {
-      this.onChunk({ turn, step, chunk: record.chunk })
-      return
-    }
-    const index = numberOf(record.index)
-    if (record.type === 'text-chunks' || record.type === 'reasoning-chunks') {
-      const texts = Array.isArray(record.texts) ? record.texts.filter((part): part is string => typeof part === 'string').join('') : ''
-      if (!texts.trim()) return
-      this.block(`b:${turn}:${step}:${index}`, record.type === 'reasoning-chunks' ? 'reasoning' : 'assistant', texts, false, 'set')
-      return
-    }
-    if (record.type !== 'tool-call-chunks') return
-    const name = typeof record.name === 'string' ? record.name : ''
-    if (!name) return
-    const id = typeof record.id === 'string' ? record.id : ''
-    const args = Array.isArray(record.chunks)
-      ? record.chunks.filter((part): part is string => typeof part === 'string').join('')
-      : ''
-    const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
-    if (!id && this.blocks.has(key)) return
-    this.block(key, 'tool', name, false, 'set', { args: clip(args, 4000) })
+  /** Remove one block everywhere: map, order, and the ball's DOM. */
+  private dropBlock(key: string): void {
+    if (!this.blocks.delete(key)) return
+    const at = this.blockOrder.indexOf(key)
+    if (at >= 0) this.blockOrder.splice(at, 1)
+    this.dirty.delete(key)
+    this.publish({ type: 'block-drop', key })
   }
 
-  private applyContent(key: string, part: unknown, turn: number, step: number, index: number, running: boolean): void {
+  /** Write one content part. Returns the key it landed on, or `undefined` when the part is skipped. */
+  private applyContent(key: string, part: unknown, running: boolean): string | undefined {
     const block = asRecord(part)
-    if (!block) return
+    if (!block) return undefined
     if ((block.type === 'text' || block.type === 'reasoning' || block.type === 'thinking') && typeof block.text === 'string') {
-      if (!block.text.trim()) return
+      if (!block.text.trim()) return undefined
       const kind = block.type === 'text' ? 'assistant' : 'reasoning'
       this.block(key, kind, block.text, running, 'set')
-      return
+      return key
     }
-    if (block.type !== 'tool-call' && block.type !== 'tool_use') return
+    if (block.type !== 'tool-call' && block.type !== 'tool_use') return undefined
     const name = typeof block.name === 'string' ? block.name : ''
-    if (!name) return
+    if (!name) return undefined
     const id = typeof block.id === 'string' ? block.id : typeof block.callId === 'string' ? block.callId : ''
-    const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
-    if (!id && this.blocks.has(toolKey)) return
+    const toolKey = id ? `tool:${id}` : key
     this.block(toolKey, 'tool', name, running, 'set', {
       args: clip(typeof block.arguments === 'string' ? block.arguments : '', 4000),
     })
+    return toolKey
   }
 
   private runningTool(name: string): string | undefined {
@@ -848,6 +875,8 @@ export class OrbRuntime {
       const item = this.blocks.get(key)
       if (item?.running) this.settleBlock(key)
     }
+    this.stepBlocks.clear()
+    this.lastAttemptByStep.clear()
     this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
     this.turnInterrupted = false
     this.stopWatch()
@@ -866,7 +895,7 @@ export class OrbRuntime {
     }
     this.blocks.set(key, message)
     this.dirty.delete(key)
-    this.broadcast(message)
+    this.publish(message)
   }
 
   private block(
@@ -900,18 +929,32 @@ export class OrbRuntime {
     }
     if (!this.blocks.has(key)) {
       this.blockOrder.push(key)
+      if (this.liveStep !== undefined) {
+        const tracked = this.stepBlocks.get(this.liveStep)
+        if (tracked) tracked.push(key)
+        else this.stepBlocks.set(this.liveStep, [key])
+      }
       while (this.blockOrder.length > 200) {
         const dropped = this.blockOrder.shift()
-        if (dropped) this.blocks.delete(dropped)
+        if (dropped) {
+          this.blocks.delete(dropped)
+          this.dirty.delete(dropped)
+        }
       }
     }
     this.blocks.set(key, message)
     if (running) {
       this.dirty.add(key)
-      this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 90)
+      this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 60)
       return
     }
     this.dirty.delete(key)
+    this.publish(message)
+  }
+
+  /** Broadcast with global FIFO: pending coalesced updates go out before anything newer. */
+  private publish(message: unknown): void {
+    this.flushDirty()
     this.broadcast(message)
   }
 
@@ -1325,7 +1368,10 @@ export class OrbRuntime {
     this.blockOrder.length = 0
     this.watermark = 0
     this.turnRunning = false
-    this.liveAttempts.clear()
+    this.attemptPositions.clear()
+    this.lastAttemptByStep.clear()
+    this.stepBlocks.clear()
+    this.liveStep = undefined
     this.clearDirty()
     this.selection.setSessionRunning(false)
     this.stopWatch()
@@ -1503,6 +1549,14 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function numberOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function partKind(part: Record<string, unknown> | undefined): BlockMessage['kind'] | undefined {
+  if (!part) return undefined
+  if (part.type === 'text') return 'assistant'
+  if (part.type === 'reasoning' || part.type === 'thinking') return 'reasoning'
+  if (part.type === 'tool-call' || part.type === 'tool_use') return 'tool'
+  return undefined
 }
 
 function callId(data: unknown): string {

@@ -1349,11 +1349,19 @@ function main() {
       const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120
       for (const item of list) {
         if (item.type === 'block') upsertBlock(item)
+        else if (item.type === 'block-drop') removeBlock(item.key)
         else if (item.type === 'turn') setRunning(item.running === true, item.interrupted === true)
         else if (item.type === 'reset') clearTranscript()
       }
       if (nearBottom) transcript.scrollTop = transcript.scrollHeight
     })
+  }
+
+  function removeBlock(key) {
+    const node = blocks.get(key)
+    if (node === undefined) return
+    blocks.delete(key)
+    node.remove()
   }
 
   function renderHistory() {
@@ -1910,6 +1918,7 @@ function main() {
   })
 
   api.onBlock((block) => { stage(block) })
+  api.onBlockDrop((key) => { stage({ type: 'block-drop', key }) })
   api.onTurn((turn) => { stage({ type: 'turn', ...(turn ?? {}) }) })
   api.onSession((id) => { sessionId = typeof id === 'string' ? id : '' })
   api.onHistory((items) => {

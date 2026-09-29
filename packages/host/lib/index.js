@@ -1447,7 +1447,13 @@ var OrbRuntime = class {
 	giveUp;
 	dirty = /* @__PURE__ */ new Set();
 	dirtyTimer;
-	liveAttempts = /* @__PURE__ */ new Map();
+	/** Chunk frames carry no turn/step; only the attempt's start frame does. */
+	attemptPositions = /* @__PURE__ */ new Map();
+	lastAttemptByStep = /* @__PURE__ */ new Map();
+	/** Transient block keys one streaming step created, in creation order. */
+	stepBlocks = /* @__PURE__ */ new Map();
+	liveStep;
+	orphanFrameLogged = false;
 	helperPid;
 	overlayWaiters = /* @__PURE__ */ new Map();
 	tcc;
@@ -1529,37 +1535,47 @@ var OrbRuntime = class {
 		if (asRecord(asRecord(record?.agent)?.session)?.id !== this.sessionId) return;
 		const frame = asRecord(record?.frame);
 		if (!frame) return;
-		const turn = numberOf(frame.turn);
-		const step = numberOf(frame.step);
+		const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
 		if (frame.type === "start") {
-			const attemptId = typeof frame.attemptId === "string" ? frame.attemptId : "";
+			if (attemptId === "") return;
+			const turn = numberOf(frame.turn);
+			const step = numberOf(frame.step);
+			this.attemptPositions.set(attemptId, {
+				turn,
+				step
+			});
 			const stepKey = `${turn}:${step}`;
-			if (attemptId !== "" && this.liveAttempts.get(stepKey) !== attemptId) {
-				this.liveAttempts.set(stepKey, attemptId);
-				this.rewindLiveStep(turn, step);
-			}
+			const previous = this.lastAttemptByStep.get(stepKey);
+			this.lastAttemptByStep.set(stepKey, attemptId);
+			if (previous !== void 0 && previous !== attemptId) this.rewindLiveStep(turn, step);
+			return;
+		}
+		if (frame.type === "end") {
+			this.attemptPositions.delete(attemptId);
 			return;
 		}
 		if (frame.type !== "chunk") return;
+		const position = this.attemptPositions.get(attemptId);
+		if (position === void 0) {
+			if (!this.orphanFrameLogged) {
+				this.orphanFrameLogged = true;
+				console.error("dsh-orb: assistant stream chunk arrived without its start frame");
+			}
+			return;
+		}
 		if (!asRecord(frame.chunk)) return;
 		this.onChunk({
-			turn,
-			step,
+			turn: position.turn,
+			step: position.step,
 			chunk: frame.chunk
 		});
 	}
-	/** A retried attempt restarts the same block keys; drop the abandoned partials so appends rebuild cleanly. */
+	/** A new attempt supersedes the dead one: drop its transient blocks so the retry streams into a clean slate. */
 	rewindLiveStep(turn, step) {
-		const prefix = `b:${turn}:${step}:`;
-		for (const key of [...this.blockOrder]) {
-			if (!key.startsWith(prefix)) continue;
-			const previous = this.blocks.get(key);
-			if (previous?.running !== true) continue;
-			this.blocks.set(key, {
-				...previous,
-				text: ""
-			});
-		}
+		const tracked = this.stepBlocks.get(`${turn}:${step}`);
+		if (!tracked) return;
+		this.stepBlocks.delete(`${turn}:${step}`);
+		for (const key of tracked) this.dropBlock(key);
 	}
 	/** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
 	async start() {
@@ -1996,86 +2012,98 @@ var OrbRuntime = class {
 		const step = numberOf(record.step);
 		const index = numberOf(chunk.index);
 		const key = `b:${turn}:${step}:${index}`;
-		if (chunk.type === "text-delta" && typeof chunk.text === "string") {
-			this.block(key, "assistant", chunk.text, true, "append");
-			return;
+		this.liveStep = `${turn}:${step}`;
+		try {
+			if (chunk.type === "text-delta" && typeof chunk.text === "string") {
+				this.block(key, "assistant", chunk.text, true, "append");
+				return;
+			}
+			if (chunk.type === "reasoning-delta" && typeof chunk.text === "string") {
+				this.block(key, "reasoning", chunk.text, true, "append");
+				return;
+			}
+			if (chunk.type === "tool-call-delta") {
+				const name = typeof chunk.name === "string" ? chunk.name : "";
+				if (!name) return;
+				const id = typeof chunk.id === "string" ? chunk.id : "";
+				const delta = typeof chunk.argumentsDelta === "string" ? chunk.argumentsDelta : "";
+				const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
+				const previous = this.blocks.get(toolKey);
+				this.block(toolKey, "tool", name, true, "set", { args: clip(`${previous?.detail?.args ?? ""}${delta}`, 4e3) });
+				return;
+			}
+			if (chunk.type === "block-end") this.applyContent(key, chunk.block, false);
+		} finally {
+			this.liveStep = void 0;
 		}
-		if (chunk.type === "reasoning-delta" && typeof chunk.text === "string") {
-			this.block(key, "reasoning", chunk.text, true, "append");
-			return;
-		}
-		if (chunk.type === "tool-call-delta") {
-			const name = typeof chunk.name === "string" ? chunk.name : "";
-			if (!name) return;
-			const id = typeof chunk.id === "string" ? chunk.id : "";
-			const delta = typeof chunk.argumentsDelta === "string" ? chunk.argumentsDelta : "";
-			const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
-			const previous = this.blocks.get(key);
-			this.block(key, "tool", name, true, "set", { args: clip(`${previous?.detail?.args ?? ""}${delta}`, 4e3) });
-			return;
-		}
-		if (chunk.type === "block-end") this.applyContent(key, chunk.block, turn, step, index, false);
 	}
+	/**
+	* Settle one assistant message like Harness settleAssistant: the transient
+	* streamed blocks are consumed in place (kind + order) and whatever the
+	* message did not claim is dropped, so no stale copy can survive the fold.
+	*/
 	onAssistant(data) {
 		const record = asRecord(data);
 		if (!record) return;
 		const turn = numberOf(record.turn);
 		const step = numberOf(record.step);
 		if (record.interrupted === true) this.turnInterrupted = true;
-		if (Array.isArray(record.stream)) for (const item of record.stream) this.foldStream(item, turn, step);
 		const content = asRecord(record.message)?.content;
-		if (typeof content === "string") {
-			this.block(`b:${turn}:${step}:0`, "assistant", content, false, "set");
-			return;
+		const parts = typeof content === "string" ? [{
+			type: "text",
+			text: content
+		}] : Array.isArray(content) ? content : [];
+		const transient = this.stepBlocks.get(`${turn}:${step}`) ?? [];
+		this.stepBlocks.delete(`${turn}:${step}`);
+		let cursor = 0;
+		for (const [index, part] of parts.entries()) {
+			const wanted = partKind(asRecord(part));
+			let key;
+			if (wanted !== void 0) while (cursor < transient.length) {
+				const candidate = transient[cursor];
+				cursor += 1;
+				if (this.blocks.get(candidate)?.kind === wanted) {
+					key = candidate;
+					break;
+				}
+				this.dropBlock(candidate);
+			}
+			key ??= `b:${turn}:${step}:${index}`;
+			if (this.applyContent(key, part, false) !== key) this.dropBlock(key);
 		}
-		if (!Array.isArray(content)) return;
-		content.forEach((part, index) => {
-			this.applyContent(`b:${turn}:${step}:${index}`, part, turn, step, index, false);
+		while (cursor < transient.length) {
+			this.dropBlock(transient[cursor]);
+			cursor += 1;
+		}
+	}
+	/** Remove one block everywhere: map, order, and the ball's DOM. */
+	dropBlock(key) {
+		if (!this.blocks.delete(key)) return;
+		const at = this.blockOrder.indexOf(key);
+		if (at >= 0) this.blockOrder.splice(at, 1);
+		this.dirty.delete(key);
+		this.publish({
+			type: "block-drop",
+			key
 		});
 	}
-	foldStream(item, turn, step) {
-		const record = asRecord(item);
-		if (!record) return;
-		if (record.type === "chunk") {
-			this.onChunk({
-				turn,
-				step,
-				chunk: record.chunk
-			});
-			return;
-		}
-		const index = numberOf(record.index);
-		if (record.type === "text-chunks" || record.type === "reasoning-chunks") {
-			const texts = Array.isArray(record.texts) ? record.texts.filter((part) => typeof part === "string").join("") : "";
-			if (!texts.trim()) return;
-			this.block(`b:${turn}:${step}:${index}`, record.type === "reasoning-chunks" ? "reasoning" : "assistant", texts, false, "set");
-			return;
-		}
-		if (record.type !== "tool-call-chunks") return;
-		const name = typeof record.name === "string" ? record.name : "";
-		if (!name) return;
-		const id = typeof record.id === "string" ? record.id : "";
-		const args = Array.isArray(record.chunks) ? record.chunks.filter((part) => typeof part === "string").join("") : "";
-		const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
-		if (!id && this.blocks.has(key)) return;
-		this.block(key, "tool", name, false, "set", { args: clip(args, 4e3) });
-	}
-	applyContent(key, part, turn, step, index, running) {
+	/** Write one content part. Returns the key it landed on, or `undefined` when the part is skipped. */
+	applyContent(key, part, running) {
 		const block = asRecord(part);
-		if (!block) return;
+		if (!block) return void 0;
 		if ((block.type === "text" || block.type === "reasoning" || block.type === "thinking") && typeof block.text === "string") {
-			if (!block.text.trim()) return;
+			if (!block.text.trim()) return void 0;
 			const kind = block.type === "text" ? "assistant" : "reasoning";
 			this.block(key, kind, block.text, running, "set");
-			return;
+			return key;
 		}
-		if (block.type !== "tool-call" && block.type !== "tool_use") return;
+		if (block.type !== "tool-call" && block.type !== "tool_use") return void 0;
 		const name = typeof block.name === "string" ? block.name : "";
-		if (!name) return;
+		if (!name) return void 0;
 		const id = typeof block.id === "string" ? block.id : typeof block.callId === "string" ? block.callId : "";
-		const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
-		if (!id && this.blocks.has(toolKey)) return;
+		const toolKey = id ? `tool:${id}` : key;
 		this.block(toolKey, "tool", name, running, "set", { args: clip(typeof block.arguments === "string" ? block.arguments : "", 4e3) });
+		return toolKey;
 	}
 	runningTool(name) {
 		for (const key of this.blockOrder) {
@@ -2088,6 +2116,8 @@ var OrbRuntime = class {
 		this.idleWarned = false;
 		this.selection.setSessionRunning(false);
 		for (const key of [...this.blockOrder]) if (this.blocks.get(key)?.running) this.settleBlock(key);
+		this.stepBlocks.clear();
+		this.lastAttemptByStep.clear();
 		this.broadcast({
 			type: "turn",
 			running: false,
@@ -2109,7 +2139,7 @@ var OrbRuntime = class {
 		};
 		this.blocks.set(key, message);
 		this.dirty.delete(key);
-		this.broadcast(message);
+		this.publish(message);
 	}
 	block(key, kind, text, running, mode, detail) {
 		const previous = this.blocks.get(key);
@@ -2139,18 +2169,31 @@ var OrbRuntime = class {
 		};
 		if (!this.blocks.has(key)) {
 			this.blockOrder.push(key);
+			if (this.liveStep !== void 0) {
+				const tracked = this.stepBlocks.get(this.liveStep);
+				if (tracked) tracked.push(key);
+				else this.stepBlocks.set(this.liveStep, [key]);
+			}
 			while (this.blockOrder.length > 200) {
 				const dropped = this.blockOrder.shift();
-				if (dropped) this.blocks.delete(dropped);
+				if (dropped) {
+					this.blocks.delete(dropped);
+					this.dirty.delete(dropped);
+				}
 			}
 		}
 		this.blocks.set(key, message);
 		if (running) {
 			this.dirty.add(key);
-			this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 90);
+			this.dirtyTimer ??= setTimeout(() => this.flushDirty(), 60);
 			return;
 		}
 		this.dirty.delete(key);
+		this.publish(message);
+	}
+	/** Broadcast with global FIFO: pending coalesced updates go out before anything newer. */
+	publish(message) {
+		this.flushDirty();
 		this.broadcast(message);
 	}
 	/** Coalesce per-token running-block updates; settled blocks always go out immediately. */
@@ -2575,7 +2618,10 @@ var OrbRuntime = class {
 		this.blockOrder.length = 0;
 		this.watermark = 0;
 		this.turnRunning = false;
-		this.liveAttempts.clear();
+		this.attemptPositions.clear();
+		this.lastAttemptByStep.clear();
+		this.stepBlocks.clear();
+		this.liveStep = void 0;
 		this.clearDirty();
 		this.selection.setSessionRunning(false);
 		this.stopWatch();
@@ -2732,6 +2778,12 @@ function asRecord(value) {
 }
 function numberOf(value) {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function partKind(part) {
+	if (!part) return void 0;
+	if (part.type === "text") return "assistant";
+	if (part.type === "reasoning" || part.type === "thinking") return "reasoning";
+	if (part.type === "tool-call" || part.type === "tool_use") return "tool";
 }
 function callId(data) {
 	const record = asRecord(data);

@@ -236,6 +236,14 @@ async function waitFor(predicate: () => boolean, timeout = 2000): Promise<void> 
   }
 }
 
+function keyOf(message: Record<string, unknown>): string {
+  return typeof message.key === 'string' ? message.key : ''
+}
+
+function textOf(message: Record<string, unknown>): string {
+  return typeof message.text === 'string' ? message.text : ''
+}
+
 describe('ball control socket', { concurrency: 1 }, () => {
   it('lists only Computer Use chats in dsh_orb and replays one when opened', async () => {
     const harness = boot()
@@ -503,7 +511,7 @@ describe('ball control socket', { concurrency: 1 }, () => {
     }
   })
 
-  it('streams assistant deltas live and settles them on the durable message', async () => {
+  it('streams assistant deltas live and settles them onto the streamed blocks', async () => {
     const harness = boot()
     const client = await connect(harness.runtime)
     try {
@@ -513,46 +521,173 @@ describe('ball control socket', { concurrency: 1 }, () => {
       harness.holdPrompt()
       client.send({ type: 'prompt', text: '流式' })
       await waitFor(() => harness.calls.prompt.length > 0)
-      const chunkFrame = (chunk: Record<string, unknown>, index: number) => (
-        { type: 'chunk', attemptId: 'a1', revision: index + 1, turn: 1, step: 0, index, chunk }
-      )
+      // Real frame shape: only the start frame carries turn/step; chunk frames carry the block index.
+      // Block indices arrive non-monotonic (reasoning@1 before text@0), matching BlockAssembler order [1, 0].
       harness.stream(sessionId, { type: 'start', attemptId: 'a1', revision: 0, turn: 1, step: 0 })
-      harness.stream(sessionId, chunkFrame({ index: 1, type: 'reasoning-delta', text: '想' }, 0))
-      harness.stream(sessionId, chunkFrame({ index: 1, type: 'reasoning-delta', text: '一下' }, 1))
-      harness.stream(sessionId, chunkFrame({ index: 0, type: 'text-delta', text: '答案' }, 2))
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, chunk: { index: 1, type: 'reasoning-delta', text: '想' } })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'a1', revision: 2, index: 1, chunk: { index: 1, type: 'reasoning-delta', text: '一下' } })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'a1', revision: 3, index: 2, chunk: { index: 0, type: 'text-delta', text: '答案' } })
       await waitFor(() => client.messages.some((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:1' && message.text === '想一下'
+        message.type === 'block' && keyOf(message) === 'b:1:0:1' && textOf(message) === '想一下'
       )))
       const reasoning = client.messages.filter((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:1'
-      )).at(-1) as { running?: boolean }
+        message.type === 'block' && keyOf(message) === 'b:1:0:1'
+      )).at(-1) as Record<string, unknown>
       assert.equal(reasoning.running, true)
       await waitFor(() => client.messages.some((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:0' && message.text === '答案'
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message) === '答案'
       )))
-
-      harness.stream(sessionId, { type: 'start', attemptId: 'a2', revision: 9, turn: 1, step: 0 })
-      harness.stream(sessionId, { type: 'chunk', attemptId: 'a2', revision: 10, turn: 1, step: 0, index: 0, chunk: { index: 0, type: 'text-delta', text: '重试' } })
-      await waitFor(() => client.messages.some((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:0' && message.text === '重试'
-      )))
+      assert.equal(client.messages.some((message) => keyOf(message).startsWith('b:0:0:')), false)
 
       harness.inject(sessionId, {
         type: 'assistant/message', seq: 1,
-        data: { turn: 1, step: 0, message: { content: [{ type: 'text', text: '答案完整' }] } },
+        data: {
+          turn: 1, step: 0,
+          message: {
+            content: [
+              { type: 'reasoning', text: '想一下' },
+              { type: 'text', text: '答案完整' },
+            ],
+          },
+        },
       })
       harness.inject(sessionId, { type: 'turn/end', seq: 2, data: {} })
       harness.releasePrompt()
       await waitFor(() => client.messages.some((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:0' && message.text === '答案完整'
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message) === '答案完整'
       )))
+      // The settled message lands on the streamed keys in place: nothing dropped, nothing duplicated.
+      assert.equal(client.messages.some((message) => message.type === 'block-drop'), false)
       const settled = client.messages.filter((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:0'
-      )).at(-1) as { running?: boolean }
+        message.type === 'block' && keyOf(message) === 'b:1:0:0'
+      )).at(-1) as Record<string, unknown>
       assert.equal(settled.running, false)
-      assert.equal(client.messages.some((message) => (
-        message.type === 'block' && (message as { key?: string }).key === 'b:1:0:1' && message.text === '想一下'
-      )), true)
+      assert.equal(settled.text, '答案完整')
+      const settledReasoning = client.messages.filter((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:1'
+      )).at(-1) as Record<string, unknown>
+      assert.equal(settledReasoning.running, false)
+      assert.equal(settledReasoning.text, '想一下')
+      assert.equal(client.messages.filter((message) => (
+        message.type === 'block' && textOf(message) === '答案完整'
+      )).length, 1)
+    } finally {
+      harness.releasePrompt()
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
+  it('drops the dead attempt blocks when the stream retries', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      harness.holdPrompt()
+      client.send({ type: 'prompt', text: '重试' })
+      await waitFor(() => harness.calls.prompt.length > 0)
+      harness.stream(sessionId, { type: 'start', attemptId: 'r1', revision: 0, turn: 1, step: 0 })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'r1', revision: 1, index: 0, chunk: { index: 0, type: 'text-delta', text: '半截' } })
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message) === '半截'
+      )))
+      harness.stream(sessionId, { type: 'start', attemptId: 'r2', revision: 2, turn: 1, step: 0 })
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block-drop' && keyOf(message) === 'b:1:0:0'
+      )))
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'r2', revision: 3, index: 0, chunk: { index: 0, type: 'text-delta', text: '重来' } })
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message) === '重来'
+      )))
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 1,
+        data: { turn: 1, step: 0, message: { content: [{ type: 'text', text: '重来答案' }] } },
+      })
+      harness.inject(sessionId, { type: 'turn/end', seq: 2, data: {} })
+      harness.releasePrompt()
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message) === '重来答案'
+      )))
+      const finals = client.messages.filter((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:0'
+      ))
+      assert.equal(textOf(finals.at(-1) as Record<string, unknown>), '重来答案')
+      // The dropped partial never resurfaces after the retry.
+      const dropIndex = client.messages.findIndex((message) => (
+        message.type === 'block-drop' && keyOf(message) === 'b:1:0:0'
+      ))
+      assert.ok(dropIndex >= 0)
+      assert.equal(client.messages.slice(dropIndex).some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:0' && textOf(message).includes('半截')
+      )), false)
+    } finally {
+      harness.releasePrompt()
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
+  it('settles each step onto its streamed blocks, including tool calls', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      harness.holdPrompt()
+      client.send({ type: 'prompt', text: '多步' })
+      await waitFor(() => harness.calls.prompt.length > 0)
+      harness.stream(sessionId, { type: 'start', attemptId: 'm0', revision: 0, turn: 1, step: 0 })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'm0', revision: 1, index: 0, chunk: { index: 1, type: 'text-delta', text: '先看' } })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'm0', revision: 2, index: 1, chunk: { index: 1, type: 'text-delta', text: '一下' } })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'm0', revision: 3, index: 2, chunk: { index: 0, type: 'tool-call-delta', id: 'call-x', name: 'bash', argumentsDelta: '{"command":"ls"}' } })
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'tool:call-x'
+      )))
+      harness.stream(sessionId, { type: 'start', attemptId: 'm1', revision: 4, turn: 1, step: 1 })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'm1', revision: 5, index: 0, chunk: { index: 0, type: 'reasoning-delta', text: '嗯' } })
+      harness.stream(sessionId, { type: 'chunk', attemptId: 'm1', revision: 6, index: 1, chunk: { index: 1, type: 'text-delta', text: '好了' } })
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 1,
+        data: {
+          turn: 1, step: 0,
+          message: {
+            content: [
+              { type: 'text', text: '先看一下' },
+              { type: 'tool-call', name: 'bash', id: 'call-x', arguments: '{"command":"ls"}' },
+            ],
+          },
+        },
+      })
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 2,
+        data: {
+          turn: 1, step: 1,
+          message: {
+            content: [
+              { type: 'reasoning', text: '嗯' },
+              { type: 'text', text: '好了' },
+            ],
+          },
+        },
+      })
+      harness.inject(sessionId, { type: 'turn/end', seq: 3, data: {} })
+      harness.releasePrompt()
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:1:1' && textOf(message) === '好了'
+      )))
+      // Every settled block landed on its streamed key: no drops, no stray copies.
+      assert.equal(client.messages.some((message) => message.type === 'block-drop'), false)
+      const texts = new Map<string, string>()
+      for (const message of client.messages.filter((entry) => entry.type === 'block')) texts.set(keyOf(message), textOf(message))
+      assert.deepEqual([...texts.keys()].filter((key) => key.startsWith('b:1:0:')), ['b:1:0:1'])
+      assert.deepEqual([...texts.keys()].filter((key) => key.startsWith('b:1:1:')).sort(), ['b:1:1:0', 'b:1:1:1'])
+      assert.equal(texts.get('b:1:0:1'), '先看一下')
+      assert.equal(texts.get('b:1:1:0'), '嗯')
+      assert.equal(texts.get('b:1:1:1'), '好了')
+      assert.equal(texts.get('tool:call-x') !== undefined, true)
     } finally {
       harness.releasePrompt()
       client.socket.end()

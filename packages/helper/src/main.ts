@@ -289,6 +289,10 @@ function deliver(message: unknown): void {
     win.webContents.send('orb:block', message)
     return
   }
+  if (record.type === 'block-drop') {
+    win.webContents.send('orb:block-drop', (record as { key?: unknown }).key)
+    return
+  }
   if (record.type === 'turn') {
     win.webContents.send('orb:turn', message)
     return
