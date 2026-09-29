@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 const PANEL_SIZE = {
-	width: 420,
+	width: 320,
 	height: 420
 };
 const PANEL_WINDOW_SIZE = {

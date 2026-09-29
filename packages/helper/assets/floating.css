@@ -21,8 +21,10 @@ body {
   --border: var(--dsw-alias-border-l4);
   --pin: var(--dsw-alias-label-secondary);
   --error: var(--dsw-alias-state-error-primary);
+  /* Shadows stay on the fork's exact values — the ball window never carried
+   * the elevation tokens, and the silhouette must match it. */
   --ball-shadow: 0 3px 8px rgba(17, 17, 17, 0.32);
-  --panel-shadow: var(--dsw-shadow-lv3, 0 4px 8px rgba(17, 17, 17, 0.22));
+  --panel-shadow: 0 4px 8px rgba(17, 17, 17, 0.22);
 }
 
 body[data-ds-dark-theme] {
