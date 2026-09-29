@@ -1,3 +1,5 @@
+import { processLabel, reasoningSummary } from './transcript-model.js'
+
 const api = window.dshOrb
 const COLLAPSE_MS = 180
 const ANIMATION_MS = 300
@@ -29,6 +31,8 @@ const zh = {
   custom: '输入你的答案',
   incomplete: '请先完成这道问题。',
   unanswered: '请选择一个选项或填写自定义答案。',
+  think: '思考',
+  running: '运行中',
 }
 const en = {
   title: 'Desktop agent',
@@ -50,6 +54,8 @@ const en = {
   custom: 'Type your answer',
   incomplete: 'Please complete this question first.',
   unanswered: 'Please select an option or enter a custom answer.',
+  think: 'Think',
+  running: 'Running',
 }
 
 const messages = navigator.language.toLowerCase().startsWith('zh') ? zh : en
@@ -96,9 +102,14 @@ function renderMarkdown(text) {
     .replace(/\n/g, '<br>')
 }
 
-function firstLine(text) {
-  const line = text.split('\n').find((item) => item.trim() !== '') ?? ''
-  return line.replace(/\*\*/g, '').trim()
+const THINK_MARKUP = '<path d="M10.7554 5.24466C13.9891 8.4783 15.3769 12.3333 13.8552 13.8551C12.3335 15.3768 8.4785 13.989 5.24478 10.7553C2.01111 7.52165 0.623307 3.66664 2.14504 2.14491C3.66676 0.623189 7.52178 2.01099 10.7554 5.24466Z" stroke="currentColor"></path><path d="M10.7554 10.7553C7.52178 13.989 3.66676 15.3768 2.14504 13.8551C0.623307 12.3333 2.01111 8.4783 5.24478 5.24466C8.4785 2.01099 12.3335 0.623189 13.8552 2.14491C15.3769 3.66664 13.9891 7.52165 10.7554 10.7553Z" stroke="currentColor"></path><path d="M8.9587 8.00025C8.9587 8.52835 8.5306 8.95655 8.0024 8.95655C7.47429 8.95655 7.04614 8.52835 7.04614 8.00025C7.04614 7.47209 7.47429 7.04395 8.0024 7.04395C8.5306 7.04395 8.9587 7.47209 8.9587 8.00025Z" fill="currentColor"></path>'
+const CHEVRON_DOWN = '<path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6" stroke="currentColor"></path>'
+const CHEVRON_UP = '<path d="M12 10L8.70711 6.70711C8.31658 6.31658 7.68342 6.31658 7.29289 6.70711L4 10" stroke="currentColor"></path>'
+
+function icon(markup) {
+  const host = document.createElement('span')
+  host.innerHTML = `<svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">${markup}</svg>`
+  return host.firstElementChild
 }
 
 function parseRecommendedLabel(label) {
@@ -190,6 +201,8 @@ function main() {
   let expanded = false
   let pinned = false
   let running = false
+  let processGroup
+  let processClock
   let dragging = false
   let collapsing = false
   let skipClick = false
@@ -262,6 +275,22 @@ function main() {
     document.body.classList.toggle('running', running)
     stop.hidden = !expanded || !running
     syncGif()
+    if (next) {
+      const group = ensureProcess()
+      if (!group.live) {
+        group.live = true
+        group.startedAt = Date.now()
+        group.elapsedMs = undefined
+        setProcessOpen(group, true)
+        refreshProcessLabel(group)
+        startProcessClock()
+      }
+    } else if (processGroup) {
+      stopProcessClock()
+      freezeProcess(processGroup)
+      setProcessOpen(processGroup, false)
+      refreshProcessLabel(processGroup)
+    }
   }
 
   function applyDirection(state) {
@@ -404,6 +433,186 @@ function main() {
     document.body.style.setProperty('--composer-height', 'var(--ball)')
   }
 
+  function refreshProcessLabel(group) {
+    if (!group) return
+    const elapsedMs = group.live
+      ? group.startedAt === undefined ? undefined : Date.now() - group.startedAt
+      : group.elapsedMs
+    group.label.textContent = processLabel({
+      zh: messages === zh,
+      running: group.live,
+      elapsedMs,
+    })
+  }
+
+  function setProcessOpen(group, open) {
+    if (!group) return
+    group.preferredOpen = open
+    const foldable = group.body.childElementCount > 0
+    const shown = open && foldable
+    group.section.toggleAttribute('data-open', shown)
+    group.header.toggleAttribute('data-open', shown)
+    group.header.disabled = !foldable
+    group.chevron.hidden = !foldable
+    if (foldable) group.header.setAttribute('aria-expanded', String(shown))
+    else group.header.removeAttribute('aria-expanded')
+  }
+
+  function freezeProcess(group) {
+    if (!group?.live) return
+    group.elapsedMs = group.startedAt === undefined ? undefined : Date.now() - group.startedAt
+    group.live = false
+  }
+
+  function stopProcessClock() {
+    if (processClock === undefined) return
+    clearInterval(processClock)
+    processClock = undefined
+  }
+
+  function startProcessClock() {
+    stopProcessClock()
+    processClock = setInterval(() => {
+      if (processGroup?.live) refreshProcessLabel(processGroup)
+    }, 1000)
+  }
+
+  function closeProcess() {
+    const group = processGroup
+    if (!group) return
+    stopProcessClock()
+    freezeProcess(group)
+    refreshProcessLabel(group)
+    setProcessOpen(group, false)
+    processGroup = undefined
+  }
+
+  function ensureProcess() {
+    if (processGroup) return processGroup
+    const section = document.createElement('section')
+    section.className = 'turn'
+    const header = document.createElement('button')
+    header.type = 'button'
+    header.className = 'process'
+    const label = document.createElement('span')
+    label.className = 'process-label'
+    const chevron = icon(CHEVRON_DOWN)
+    chevron.classList.add('process-chevron')
+    header.append(label, chevron)
+    const body = document.createElement('div')
+    body.className = 'process-body'
+    const answer = document.createElement('div')
+    answer.className = 'turn-answer'
+    section.append(header, body, answer)
+    const loose = []
+    let anchor = null
+    for (const child of transcript.children) {
+      if (child.dataset?.kind === 'user') {
+        loose.length = 0
+        anchor = null
+        continue
+      }
+      if (child.dataset?.kind === 'assistant') {
+        if (anchor === null) anchor = child
+        loose.push(child)
+      }
+    }
+    if (anchor) transcript.insertBefore(section, anchor)
+    else transcript.append(section)
+    for (const node of loose) answer.append(node)
+    const live = running
+    const group = {
+      section, header, label, chevron, body, answer, live,
+      startedAt: live ? Date.now() : undefined,
+      elapsedMs: undefined,
+      preferredOpen: live,
+    }
+    processGroup = group
+    header.addEventListener('click', () => {
+      if (header.disabled) return
+      setProcessOpen(group, !section.hasAttribute('data-open'))
+    })
+    setProcessOpen(group, live)
+    refreshProcessLabel(group)
+    if (live) startProcessClock()
+    return group
+  }
+
+  function syncThinkPreview(node) {
+    const summary = node.querySelector('.think-summary-text')?.textContent ?? ''
+    node.toggleAttribute('data-preview', !node.hasAttribute('data-expanded') && summary !== '')
+  }
+
+  function createThink(node) {
+    node.dataset.variant = 'think'
+    const status = document.createElement('span')
+    status.className = 'visually-hidden'
+    const disclosure = document.createElement('div')
+    disclosure.className = 'think-disclosure'
+    const row = document.createElement('div')
+    row.className = 'think-row'
+    row.setAttribute('role', 'button')
+    row.tabIndex = 0
+    row.setAttribute('aria-expanded', 'false')
+    const leading = document.createElement('span')
+    leading.className = 'think-leading'
+    const idle = document.createElement('span')
+    idle.className = 'think-icon-idle'
+    idle.append(icon(THINK_MARKUP))
+    const hover = document.createElement('span')
+    hover.className = 'think-chevron-hover'
+    hover.append(icon(CHEVRON_DOWN))
+    const openChevron = document.createElement('span')
+    openChevron.className = 'think-chevron-open'
+    openChevron.append(icon(CHEVRON_UP))
+    leading.append(idle, hover, openChevron)
+    const title = document.createElement('span')
+    title.className = 'think-title'
+    title.textContent = messages.think
+    const separator = document.createElement('span')
+    separator.className = 'think-separator'
+    separator.setAttribute('aria-hidden', 'true')
+    const summary = document.createElement('span')
+    summary.className = 'think-summary'
+    const summaryText = document.createElement('span')
+    summaryText.className = 'think-summary-text'
+    summary.append(summaryText)
+    row.append(leading, title, separator, summary)
+    const body = document.createElement('div')
+    body.className = 'think-body block-body'
+    disclosure.append(row, body)
+    node.append(status, disclosure)
+    const toggle = () => {
+      const open = !node.hasAttribute('data-expanded')
+      node.toggleAttribute('data-expanded', open)
+      disclosure.toggleAttribute('data-open', open)
+      row.setAttribute('aria-expanded', String(open))
+      syncThinkPreview(node)
+    }
+    row.addEventListener('click', toggle)
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      toggle()
+    })
+  }
+
+  function placeBlock(node, kind) {
+    if (kind === 'user') {
+      closeProcess()
+      transcript.append(node)
+      return
+    }
+    if (kind === 'assistant') {
+      if (processGroup) processGroup.answer.append(node)
+      else transcript.append(node)
+      return
+    }
+    const group = ensureProcess()
+    group.body.append(node)
+    setProcessOpen(group, group.preferredOpen === true)
+  }
+
   function upsertBlock(block) {
     if (typeof block?.key !== 'string' || typeof block.text !== 'string') return
     let node = blocks.get(block.key)
@@ -411,34 +620,25 @@ function main() {
       node = document.createElement('article')
       node.className = 'block'
       node.dataset.kind = block.kind
-      if (block.kind === 'reasoning') {
-        node.dataset.variant = 'think'
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = 'think-toggle'
-        const mark = document.createElement('span')
-        mark.className = 'think-mark'
-        const summary = document.createElement('span')
-        summary.className = 'think-summary'
-        button.append(mark, summary)
-        const body = document.createElement('div')
-        body.className = 'think-body'
-        node.append(button, body)
-        button.addEventListener('click', () => {
-          node.toggleAttribute('data-expanded')
-        })
-      } else {
+      if (block.kind === 'reasoning') createThink(node)
+      else {
         const body = document.createElement('div')
         body.className = 'block-body'
         node.append(body)
       }
       blocks.set(block.key, node)
-      transcript.append(node)
+      placeBlock(node, block.kind)
     }
     node.dataset.state = block.running ? 'running' : 'ok'
     if (block.kind === 'reasoning') {
-      node.querySelector('.think-summary').textContent = firstLine(block.text)
+      const summary = reasoningSummary(block.text, block.running === true)
+      node.querySelector('.think-summary-text').textContent = summary
+      const preview = node.querySelector('.think-summary')
+      if (block.running) preview.setAttribute('data-streaming', 'true')
+      else preview.removeAttribute('data-streaming')
+      node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
       node.querySelector('.think-body').innerHTML = renderMarkdown(block.text)
+      syncThinkPreview(node)
     } else if (block.kind === 'tool') {
       node.querySelector('.block-body').textContent = block.text
     } else {
@@ -472,6 +672,8 @@ function main() {
   }
 
   function clearTranscript() {
+    stopProcessClock()
+    processGroup = undefined
     blocks.clear()
     transcript.replaceChildren()
     pending = undefined
@@ -897,6 +1099,13 @@ function main() {
     renderPermission()
   })
   api.onReset(() => { clearTranscript() })
+  api.onAttach((text) => {
+    if (typeof text !== 'string' || text === '') return
+    void setExpanded(true).then(() => {
+      insertPlainText(prompt, text)
+      prompt.focus()
+    })
+  })
   api.onAvatar((src) => {
     avatarSrc = typeof src === 'string' && src !== '' ? src : 'deepseek-avatar-square.gif'
     const gif = document.querySelector('#ball-gif')

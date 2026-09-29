@@ -8,6 +8,7 @@ import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate } from './menu.ts'
+import { attachOverlays } from './overlays.ts'
 import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
 
 const socketAddress = process.env.DSH_ORB_SOCKET ?? ''
@@ -47,6 +48,7 @@ if (!socketAddress || !token) {
 if (process.platform === 'darwin') app.setActivationPolicy?.('accessory')
 
 let win: BrowserWindow | undefined
+let overlays: { deliver(message: unknown): boolean } | undefined
 let placement: FloatingPlacement | undefined
 let live: Socket | undefined
 let quitting = false
@@ -63,6 +65,11 @@ app.on('window-all-closed', () => {
 void app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide()
   win = openWindow()
+  try {
+    overlays = await attachOverlays({ ball: () => win, write })
+  } catch (error) {
+    console.error(`dsh-orb helper: overlays did not open: ${error instanceof Error ? error.message : String(error)}`)
+  }
   placement = new FloatingPlacement(win, (point) => {
     const display = screen.getDisplayNearestPoint({ x: Math.round(point.x), y: Math.round(point.y) })
     return { bounds: display.bounds, workArea: display.workArea }
@@ -178,6 +185,9 @@ function openWindow(): BrowserWindow {
   created.webContents.on('will-navigate', (event) => {
     event.preventDefault()
   })
+  created.on('closed', () => {
+    if (!quitting) app.quit()
+  })
   created.once('ready-to-show', () => {
     created.showInactive()
     created.setContentProtection(true)
@@ -199,7 +209,7 @@ function connect(attempt: number): void {
     opened = true
     live = socket
     buffer = ''
-    socket.write(`${JSON.stringify({ type: 'hello', token })}\n`)
+    socket.write(`${JSON.stringify({ type: 'hello', token, pid: process.pid })}\n`)
   })
   socket.on('data', (chunk: string) => {
     buffer += chunk
@@ -236,6 +246,7 @@ function connect(attempt: number): void {
 }
 
 function deliver(message: unknown): void {
+  if (overlays?.deliver(message)) return
   if (typeof message !== 'object' || message === null || !win) return
   const record = message as { type?: unknown }
   if (record.type === 'session') {

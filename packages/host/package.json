@@ -22,6 +22,7 @@
   "license": "MIT",
   "dependencies": {
     "@dsh-orb/helper": "file:../helper",
+    "@dsh-orb/native-selection": "file:../native-selection",
     "koffi": "^3.1.0"
   },
   "peerDependencies": {

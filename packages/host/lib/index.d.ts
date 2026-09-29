@@ -1,3 +1,4 @@
+import "@dsh-orb/native-selection";
 //#region src/orb.d.ts
 /** Host services the plugin injects. Shapes match the official 0.1.7-rc.2 controllers. */
 interface OrbContext {

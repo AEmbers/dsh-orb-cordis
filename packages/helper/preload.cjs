@@ -73,4 +73,27 @@ contextBridge.exposeInMainWorld('dshOrb', {
   onAvatar(callback) {
     ipcRenderer.on('orb:avatar', (_event, src) => callback(src))
   },
+  onAttach(callback) {
+    ipcRenderer.on('orb:attach', (_event, text) => callback(text))
+  },
+  selection: {
+    search() {
+      ipcRenderer.send('orb:selection-action', { action: 'search' })
+    },
+    translate() {
+      ipcRenderer.send('orb:selection-action', { action: 'translate' })
+    },
+    sendToAgent() {
+      ipcRenderer.send('orb:selection-action', { action: 'send' })
+    },
+    setLanguage(language) {
+      ipcRenderer.send('orb:selection-action', { action: 'language', language })
+    },
+    setContentSize(size) {
+      return ipcRenderer.invoke('orb:selection-size', size)
+    },
+    onState(callback) {
+      ipcRenderer.on('orb:selection-state', (_event, state) => callback(state))
+    },
+  },
 })

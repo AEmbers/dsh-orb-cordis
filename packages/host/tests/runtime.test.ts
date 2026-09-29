@@ -154,7 +154,9 @@ function boot(): Harness {
       return () => {}
     },
   }
-  const runtime = new OrbRuntime(ctx as unknown as OrbContext, store)
+  const runtime = new OrbRuntime(ctx as unknown as OrbContext, store, {
+    startMonitor: () => undefined,
+  })
   runtime.attachQuestions()
   runtimes.push(runtime)
   return {

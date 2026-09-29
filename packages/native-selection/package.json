@@ -1,0 +1,23 @@
+{
+  "name": "@dsh-orb/native-selection",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Prebuilt selection monitor. Darwin listens on its own run loop; Windows uses koffi.",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "prebuilds",
+    "scripts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "koffi": "^3.1.0"
+  }
+}

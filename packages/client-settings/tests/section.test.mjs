@@ -218,7 +218,7 @@ describe('settings section', () => {
     assert.match(patch, /id: ui-settings-orb/)
     assert.match(patch, /name: '@dsh-orb\/client-ui-settings-orb'/)
     const client = readFileSync(join(here, '../client.js'), 'utf8')
-    assert.match(client, /工具条在后续版本出现/)
+    assert.match(client, /在其他应用里选中文字会出现搜索、翻译和发给 Agent/)
     assert.equal(client.includes('authenticatedUrl'), false)
   })
 })

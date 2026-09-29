@@ -19,7 +19,7 @@ export interface ContextMenuActions {
   disable(): void
 }
 
-/** Labels and actions for the ball menu. The selection switch only changes the stored preference. */
+/** Labels and actions for the ball menu. The selection checkbox writes the preference; the host starts and stops the monitor. */
 export function contextMenuTemplate(state: ContextMenuState, zh: boolean, actions: ContextMenuActions): MenuItem[] {
   const labels = {
     empty: zh ? '没有可用的模型。' : 'No models available.',

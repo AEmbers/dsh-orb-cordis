@@ -21,6 +21,13 @@ import {
   type ProfileStore,
 } from './preferences.ts'
 import { tokensMatch } from './routes.ts'
+import { createOverlayGuard } from './overlay-guard.ts'
+import {
+  openSystemUrl,
+  productionAccessibility,
+  SelectionController,
+  type SelectionStarter,
+} from './selection.ts'
 import { pinSessionId } from './services.ts'
 
 const require = createRequire(import.meta.url)
@@ -154,8 +161,42 @@ export class OrbRuntime {
   private missingLogged = false
   private timer: ReturnType<typeof setInterval> | undefined
   private giveUp: ReturnType<typeof setTimeout> | undefined
+  private helperPid: number | undefined
+  private readonly overlayWaiters = new Map<string, () => void>()
+  private readonly selection: SelectionController
+  private readonly overlay = createOverlayGuard({
+    hasHelper: () => this.sockets.size > 0,
+    send: (message, signal) => this.waitAck(message, signal),
+    setHidInput: (active) => { this.selection.setHidInput(active) },
+  })
 
-  constructor(private readonly ctx: OrbContext, private readonly store: ProfileStore) {}
+  constructor(
+    private readonly ctx: OrbContext,
+    private readonly store: ProfileStore,
+    options: { startMonitor?: SelectionStarter } = {},
+  ) {
+    const access = productionAccessibility()
+    this.selection = new SelectionController({
+      enabled: () => this.store.selectionEnabled(),
+      language: () => this.store.translateLanguage(),
+      setLanguage: (language) => {
+        this.store.setTranslateLanguage(language)
+        this.broadcast({ type: 'selection-language', language })
+      },
+      helperConnected: () => this.sockets.size > 0,
+      helperPid: () => this.helperPid,
+      show: (payload) => { this.broadcast({ type: 'selection', ...payload }) },
+      hide: () => { this.broadcast({ type: 'selection-hide' }) },
+      pointer: (x, y) => { this.broadcast({ type: 'selection-pointer', x, y }) },
+      attach: (text) => { this.broadcast({ type: 'selection-attach', text }) },
+      prompt: (text) => { void this.onPrompt(text) },
+      openExternal: (url) => { openSystemUrl(url) },
+      requestAccessibility: () => access.requestAccessibility(),
+      accessibilityTrusted: () => access.accessibilityTrusted(),
+      now: () => Date.now(),
+    }, options.startMonitor)
+    ctx.provide('computerUseOverlayGuard', this.overlay)
+  }
 
   /** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
   async start(): Promise<void> {
@@ -219,6 +260,9 @@ export class OrbRuntime {
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     this.buffers.clear()
+    this.helperPid = undefined
+    this.overlayWaiters.clear()
+    this.selection.stop()
     this.killChild()
   }
 
@@ -282,7 +326,7 @@ export class OrbRuntime {
           }
           authed = true
           clearTimeout(timer)
-          this.accept(socket)
+          this.accept(socket, message)
           continue
         }
         if (isPrompt(message)) void this.onPrompt(message.text)
@@ -294,7 +338,11 @@ export class OrbRuntime {
     socket.on('close', () => {
       this.sockets.delete(socket)
       this.buffers.delete(socket)
-      if (this.sockets.size === 0) this.failQuestion('the floating ball closed before the user answered', 'ASK_ABORTED')
+      if (this.sockets.size === 0) {
+        this.failQuestion('the floating ball closed before the user answered', 'ASK_ABORTED')
+        this.helperPid = undefined
+        this.selection.stop()
+      }
     })
     socket.on('error', () => {
       socket.destroy()
@@ -310,7 +358,9 @@ export class OrbRuntime {
     return given.length === expected.length && timingSafeEqual(given, expected)
   }
 
-  private accept(socket: Socket): void {
+  private accept(socket: Socket, hello: unknown): void {
+    const pid = asRecord(hello)?.pid
+    if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) this.helperPid = pid
     this.sockets.add(socket)
     if (this.sessionId) this.send(socket, { type: 'session', sessionId: this.sessionId })
     if (this.blockOrder.length === 0 && this.sessionId) {
@@ -326,6 +376,7 @@ export class OrbRuntime {
     this.send(socket, { type: 'turn', running: this.turnRunning })
     if (this.pending) this.send(socket, this.questionPayload(this.pending.id))
     void this.publishChrome()
+    this.selection.sync()
   }
 
   private async onPrompt(text: string): Promise<void> {
@@ -333,9 +384,11 @@ export class OrbRuntime {
     if (!trimmed) return
     this.block(`user:${randomUUID()}`, 'user', trimmed, false, 'set')
     this.turnRunning = true
+    this.selection.setSessionRunning(true)
     this.broadcast({ type: 'turn', running: true })
     if (this.sessionError && !this.sessionId) {
       this.turnRunning = false
+      this.selection.setSessionRunning(false)
       this.broadcast({ type: 'turn', running: false })
       this.status(this.sessionError)
       return
@@ -606,6 +659,7 @@ export class OrbRuntime {
 
   private finishTurn(): void {
     this.turnRunning = false
+    this.selection.setSessionRunning(false)
     for (const key of [...this.blockOrder]) {
       const item = this.blocks.get(key)
       if (item?.running) this.block(key, item.kind, item.text, false, 'set')
@@ -816,6 +870,7 @@ export class OrbRuntime {
 
   async setSelectionEnabled(enabled: boolean): Promise<void> {
     this.store.setSelectionEnabled(enabled)
+    this.selection.sync()
     await this.publishChrome()
   }
 
@@ -836,6 +891,15 @@ export class OrbRuntime {
   private onControl(message: unknown): void {
     const record = asRecord(message)
     if (!record || typeof record.type !== 'string') return
+    if (record.type === 'overlay-ack' && typeof record.id === 'string') {
+      this.overlayWaiters.get(record.id)?.()
+      this.overlayWaiters.delete(record.id)
+      return
+    }
+    if (record.type === 'selection-action' && typeof record.action === 'string') {
+      this.onSelectionAction(record)
+      return
+    }
     if (record.type === 'history') {
       void this.sendHistory()
       return
@@ -930,6 +994,7 @@ export class OrbRuntime {
     this.replaying = false
     if (row.running) {
       this.turnRunning = true
+      this.selection.setSessionRunning(true)
       this.broadcast({ type: 'turn', running: true })
       this.watch()
     }
@@ -973,9 +1038,45 @@ export class OrbRuntime {
     this.blockOrder.length = 0
     this.watermark = 0
     this.turnRunning = false
+    this.selection.setSessionRunning(false)
     this.stopWatch()
     this.broadcast({ type: 'reset' })
     this.broadcast({ type: 'turn', running: false })
+  }
+
+  private onSelectionAction(record: Record<string, unknown>): void {
+    if (record.action === 'search') this.selection.search()
+    else if (record.action === 'translate') this.selection.translate()
+    else if (record.action === 'send') this.selection.sendToAgent()
+    else if (record.action === 'language' && (record.language === 'zh' || record.language === 'en')) {
+      this.selection.setLanguage(record.language)
+    }
+  }
+
+  private waitAck(message: { id: string; type: string; [key: string]: unknown }, signal?: AbortSignal): Promise<void> {
+    if (this.sockets.size === 0) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (abort: boolean) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        this.overlayWaiters.delete(message.id)
+        if (abort) reject(signal?.reason instanceof Error ? signal.reason : new Error('dsh-orb: overlay ack aborted'))
+        else resolve()
+      }
+      const timer = setTimeout(() => { finish(false) }, 1_000)
+      timer.unref()
+      const onAbort = () => { finish(true) }
+      if (signal?.aborted) {
+        finish(true)
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.overlayWaiters.set(message.id, () => { finish(false) })
+      this.broadcast(message)
+    })
   }
 
   private async applyOverlayQuiet(sessionId: string): Promise<void> {

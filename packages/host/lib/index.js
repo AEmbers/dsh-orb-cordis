@@ -8,6 +8,7 @@ import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { pipeline } from "node:stream/promises";
+import { accessibilityTrusted, promptAccessibility, startSelectionMonitor } from "@dsh-orb/native-selection";
 //#region src/tcc.ts
 /**
 * Screen Recording and Accessibility status for the process that actually calls screencapture and osascript.
@@ -197,6 +198,16 @@ var ProfileStore = class {
 	}
 	selectionEnabled() {
 		return this.selectionValue;
+	}
+	translateLanguage() {
+		return this.selectionLanguage;
+	}
+	setTranslateLanguage(language) {
+		this.selectionLanguage = language;
+		writeJson(join(this.dir, SELECTION_FILE), {
+			enabled: this.selectionValue,
+			translateTargetLanguage: language
+		});
 	}
 	setSelectionEnabled(enabled) {
 		this.selectionValue = enabled;
@@ -924,6 +935,283 @@ function spawnOpen(target) {
 		});
 	});
 }
+function delay(ms) {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms).unref();
+	});
+}
+function createOverlayGuard(transport) {
+	let inputDepth = 0;
+	const sleep = transport.sleep ?? delay;
+	return {
+		async withCapture(run) {
+			return run({ excludeWindowIds: [] });
+		},
+		async withInput(run) {
+			inputDepth += 1;
+			const outer = inputDepth === 1;
+			const cloaked = outer && transport.hasHelper();
+			try {
+				if (outer) {
+					transport.setHidInput(true);
+					if (cloaked) await transport.send({
+						type: "overlay-input",
+						id: randomUUID(),
+						active: true
+					});
+				}
+				const value = await run();
+				if (cloaked) await sleep(80);
+				return value;
+			} finally {
+				inputDepth -= 1;
+				if (inputDepth === 0) try {
+					if (cloaked) await transport.send({
+						type: "overlay-input",
+						id: randomUUID(),
+						active: false
+					});
+				} finally {
+					transport.setHidInput(false);
+				}
+			}
+		},
+		async setObservationFrame(bounds, signal) {
+			if (!transport.hasHelper()) return;
+			if (bounds !== null && signal?.aborted) {
+				await transport.send({
+					type: "observation-frame",
+					id: randomUUID(),
+					bounds: null
+				});
+				return;
+			}
+			try {
+				await transport.send({
+					type: "observation-frame",
+					id: randomUUID(),
+					bounds
+				}, signal);
+			} catch (error) {
+				if (bounds !== null && signal?.aborted) {
+					await transport.send({
+						type: "observation-frame",
+						id: randomUUID(),
+						bounds: null
+					});
+					return;
+				}
+				throw error;
+			}
+		}
+	};
+}
+const SELECTION_ACCESSIBILITY_POLL_MS = 1e3;
+const SELECTION_PREAMBLE = "Desktop selection. Answer in this chat only. Do not call GUI tools or code_agent.";
+function selectionSearchUrl(text) {
+	return `https://www.bing.com/search?q=${encodeURIComponent(text)}`;
+}
+function composeSelectionTranslatePrompt(text, language) {
+	return `${SELECTION_PREAMBLE}\n\nTranslate the following into ${language === "en" ? "English" : "Chinese"}:\n\n${text}`;
+}
+/** Open a URL with the system handler. Search uses this and does not expand the ball. */
+function openSystemUrl(url) {
+	const command = process.platform === "win32" ? "cmd" : "open";
+	const args = process.platform === "win32" ? [
+		"/c",
+		"start",
+		"",
+		url
+	] : [url];
+	const child = spawn(command, args, {
+		stdio: "ignore",
+		windowsHide: true
+	});
+	child.once("error", (error) => {
+		console.error(`dsh-orb: open failed: ${error.message}`);
+	});
+	child.unref();
+}
+var SelectionController = class {
+	host;
+	startMonitor;
+	monitor;
+	lastText = "";
+	lastAnchor = {
+		x: 0,
+		y: 0
+	};
+	lastDedupe;
+	lastPid;
+	restoreTimer;
+	sessionRunning = false;
+	hidInput = false;
+	promptedAccessibility = false;
+	accessibilityPoll;
+	constructor(host, startMonitor = startSelectionMonitor) {
+		this.host = host;
+		this.startMonitor = startMonitor;
+	}
+	/** Start while the helper is connected and the switch is on. */
+	sync() {
+		if (process.platform === "linux") return;
+		if (this.host.helperConnected() && this.host.enabled()) this.start();
+		else this.stop();
+	}
+	stop() {
+		this.clearAccessibilityPoll();
+		this.monitor?.stop();
+		this.monitor = void 0;
+		if (this.restoreTimer !== void 0) {
+			clearTimeout(this.restoreTimer);
+			this.restoreTimer = void 0;
+		}
+		this.host.hide();
+	}
+	setLanguage(language) {
+		this.host.setLanguage(language);
+	}
+	setSessionRunning(running) {
+		this.sessionRunning = running;
+		if (running) this.host.hide();
+	}
+	setHidInput(active) {
+		this.hidInput = active;
+		if (active) this.host.hide();
+	}
+	search() {
+		if (this.lastText === "") return;
+		this.host.hide();
+		this.host.openExternal(selectionSearchUrl(this.lastText));
+	}
+	translate() {
+		if (this.lastText === "") return;
+		const text = composeSelectionTranslatePrompt(this.lastText, this.host.language());
+		this.host.hide();
+		this.host.prompt(text);
+		this.scheduleRestoreFrontApp();
+	}
+	sendToAgent() {
+		if (this.lastText === "") return;
+		this.host.hide();
+		this.host.attach(this.lastText);
+	}
+	onHelperEvent(event) {
+		switch (event.type) {
+			case "ready":
+				this.exclude();
+				return;
+			case "untrusted":
+				if (!this.promptedAccessibility) {
+					this.promptedAccessibility = true;
+					this.host.requestAccessibility();
+				}
+				this.watchAccessibility();
+				return;
+			case "mouse-down":
+				this.host.pointer(event.x, event.y);
+				return;
+			case "key":
+			case "dismiss":
+				this.host.hide();
+				return;
+			case "mouse-up":
+				this.lastAnchor = {
+					x: event.x,
+					y: event.y
+				};
+				return;
+			case "selection":
+				this.onSelection(event);
+				return;
+		}
+	}
+	start() {
+		if (this.monitor !== void 0) return;
+		const started = this.startMonitor({ onEvent: (event) => {
+			this.onHelperEvent(event);
+		} });
+		if (started === void 0) return;
+		this.monitor = started;
+		this.exclude();
+	}
+	exclude() {
+		const pids = [process.pid];
+		const helper = this.host.helperPid();
+		if (helper !== void 0) pids.push(helper);
+		this.monitor?.setExcludePids(pids);
+	}
+	pausedReads() {
+		return this.sessionRunning || this.hidInput || !this.host.enabled();
+	}
+	onSelection(event) {
+		if (this.pausedReads()) return;
+		const key = `${String(event.pid ?? 0)}\0${event.bundle ?? ""}\0${event.text}`;
+		const now = this.host.now();
+		if (this.lastDedupe !== void 0 && this.lastDedupe.key === key && now - this.lastDedupe.at < 3e3) return;
+		this.lastDedupe = {
+			key,
+			at: now
+		};
+		this.lastText = event.text;
+		this.lastPid = event.pid;
+		if (event.x !== void 0 && event.y !== void 0) this.lastAnchor = {
+			x: event.x,
+			y: event.y
+		};
+		this.host.show({
+			text: event.text,
+			x: this.lastAnchor.x,
+			y: this.lastAnchor.y,
+			language: this.host.language()
+		});
+	}
+	scheduleRestoreFrontApp() {
+		this.restoreFrontApp();
+		if (this.restoreTimer !== void 0) clearTimeout(this.restoreTimer);
+		const timer = setTimeout(() => {
+			this.restoreTimer = void 0;
+			this.restoreFrontApp();
+		}, 80);
+		timer.unref();
+		this.restoreTimer = timer;
+	}
+	restoreFrontApp() {
+		const pid = this.lastPid;
+		if (pid === void 0 || pid === process.pid) return;
+		this.monitor?.activatePid(pid);
+	}
+	watchAccessibility() {
+		if (this.accessibilityPoll !== void 0) return;
+		const timer = setInterval(() => {
+			if (!this.host.enabled() || this.monitor === void 0) {
+				this.clearAccessibilityPoll();
+				return;
+			}
+			if (!this.host.accessibilityTrusted()) return;
+			this.rearm();
+		}, SELECTION_ACCESSIBILITY_POLL_MS);
+		timer.unref();
+		this.accessibilityPoll = timer;
+	}
+	rearm() {
+		this.clearAccessibilityPoll();
+		this.monitor?.stop();
+		this.monitor = void 0;
+		this.start();
+	}
+	clearAccessibilityPoll() {
+		if (this.accessibilityPoll === void 0) return;
+		clearInterval(this.accessibilityPoll);
+		this.accessibilityPoll = void 0;
+	}
+};
+function productionAccessibility() {
+	return {
+		requestAccessibility: () => promptAccessibility(),
+		accessibilityTrusted: () => accessibilityTrusted()
+	};
+}
 //#endregion
 //#region src/orb.ts
 /**
@@ -962,9 +1250,65 @@ var OrbRuntime = class {
 	missingLogged = false;
 	timer;
 	giveUp;
-	constructor(ctx, store) {
+	helperPid;
+	overlayWaiters = /* @__PURE__ */ new Map();
+	selection;
+	overlay = createOverlayGuard({
+		hasHelper: () => this.sockets.size > 0,
+		send: (message, signal) => this.waitAck(message, signal),
+		setHidInput: (active) => {
+			this.selection.setHidInput(active);
+		}
+	});
+	constructor(ctx, store, options = {}) {
 		this.ctx = ctx;
 		this.store = store;
+		const access = productionAccessibility();
+		this.selection = new SelectionController({
+			enabled: () => this.store.selectionEnabled(),
+			language: () => this.store.translateLanguage(),
+			setLanguage: (language) => {
+				this.store.setTranslateLanguage(language);
+				this.broadcast({
+					type: "selection-language",
+					language
+				});
+			},
+			helperConnected: () => this.sockets.size > 0,
+			helperPid: () => this.helperPid,
+			show: (payload) => {
+				this.broadcast({
+					type: "selection",
+					...payload
+				});
+			},
+			hide: () => {
+				this.broadcast({ type: "selection-hide" });
+			},
+			pointer: (x, y) => {
+				this.broadcast({
+					type: "selection-pointer",
+					x,
+					y
+				});
+			},
+			attach: (text) => {
+				this.broadcast({
+					type: "selection-attach",
+					text
+				});
+			},
+			prompt: (text) => {
+				this.onPrompt(text);
+			},
+			openExternal: (url) => {
+				openSystemUrl(url);
+			},
+			requestAccessibility: () => access.requestAccessibility(),
+			accessibilityTrusted: () => access.accessibilityTrusted(),
+			now: () => Date.now()
+		}, options.startMonitor);
+		ctx.provide("computerUseOverlayGuard", this.overlay);
 	}
 	/** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
 	async start() {
@@ -1028,6 +1372,9 @@ var OrbRuntime = class {
 		for (const socket of this.sockets) socket.destroy();
 		this.sockets.clear();
 		this.buffers.clear();
+		this.helperPid = void 0;
+		this.overlayWaiters.clear();
+		this.selection.stop();
 		this.killChild();
 	}
 	/** Claim questions for this orb session. Register this while the plugin fiber is active. */
@@ -1084,7 +1431,7 @@ var OrbRuntime = class {
 					}
 					authed = true;
 					clearTimeout(timer);
-					this.accept(socket);
+					this.accept(socket, message);
 					continue;
 				}
 				if (isPrompt(message)) this.onPrompt(message.text);
@@ -1096,7 +1443,11 @@ var OrbRuntime = class {
 		socket.on("close", () => {
 			this.sockets.delete(socket);
 			this.buffers.delete(socket);
-			if (this.sockets.size === 0) this.failQuestion("the floating ball closed before the user answered", "ASK_ABORTED");
+			if (this.sockets.size === 0) {
+				this.failQuestion("the floating ball closed before the user answered", "ASK_ABORTED");
+				this.helperPid = void 0;
+				this.selection.stop();
+			}
 		});
 		socket.on("error", () => {
 			socket.destroy();
@@ -1110,7 +1461,9 @@ var OrbRuntime = class {
 		const expected = Buffer.from(this.token);
 		return given.length === expected.length && timingSafeEqual(given, expected);
 	}
-	accept(socket) {
+	accept(socket, hello) {
+		const pid = asRecord(hello)?.pid;
+		if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) this.helperPid = pid;
 		this.sockets.add(socket);
 		if (this.sessionId) this.send(socket, {
 			type: "session",
@@ -1130,18 +1483,21 @@ var OrbRuntime = class {
 		});
 		if (this.pending) this.send(socket, this.questionPayload(this.pending.id));
 		this.publishChrome();
+		this.selection.sync();
 	}
 	async onPrompt(text) {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 		this.block(`user:${randomUUID()}`, "user", trimmed, false, "set");
 		this.turnRunning = true;
+		this.selection.setSessionRunning(true);
 		this.broadcast({
 			type: "turn",
 			running: true
 		});
 		if (this.sessionError && !this.sessionId) {
 			this.turnRunning = false;
+			this.selection.setSessionRunning(false);
 			this.broadcast({
 				type: "turn",
 				running: false
@@ -1400,6 +1756,7 @@ var OrbRuntime = class {
 	}
 	finishTurn() {
 		this.turnRunning = false;
+		this.selection.setSessionRunning(false);
 		for (const key of [...this.blockOrder]) {
 			const item = this.blocks.get(key);
 			if (item?.running) this.block(key, item.kind, item.text, false, "set");
@@ -1623,6 +1980,7 @@ var OrbRuntime = class {
 	}
 	async setSelectionEnabled(enabled) {
 		this.store.setSelectionEnabled(enabled);
+		this.selection.sync();
 		await this.publishChrome();
 	}
 	async setMillifractionEnabled(enabled) {
@@ -1640,6 +1998,15 @@ var OrbRuntime = class {
 	onControl(message) {
 		const record = asRecord(message);
 		if (!record || typeof record.type !== "string") return;
+		if (record.type === "overlay-ack" && typeof record.id === "string") {
+			this.overlayWaiters.get(record.id)?.();
+			this.overlayWaiters.delete(record.id);
+			return;
+		}
+		if (record.type === "selection-action" && typeof record.action === "string") {
+			this.onSelectionAction(record);
+			return;
+		}
 		if (record.type === "history") {
 			this.sendHistory();
 			return;
@@ -1729,6 +2096,7 @@ var OrbRuntime = class {
 		this.replaying = false;
 		if (row.running) {
 			this.turnRunning = true;
+			this.selection.setSessionRunning(true);
 			this.broadcast({
 				type: "turn",
 				running: true
@@ -1775,11 +2143,49 @@ var OrbRuntime = class {
 		this.blockOrder.length = 0;
 		this.watermark = 0;
 		this.turnRunning = false;
+		this.selection.setSessionRunning(false);
 		this.stopWatch();
 		this.broadcast({ type: "reset" });
 		this.broadcast({
 			type: "turn",
 			running: false
+		});
+	}
+	onSelectionAction(record) {
+		if (record.action === "search") this.selection.search();
+		else if (record.action === "translate") this.selection.translate();
+		else if (record.action === "send") this.selection.sendToAgent();
+		else if (record.action === "language" && (record.language === "zh" || record.language === "en")) this.selection.setLanguage(record.language);
+	}
+	waitAck(message, signal) {
+		if (this.sockets.size === 0) return Promise.resolve();
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (abort) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				this.overlayWaiters.delete(message.id);
+				if (abort) reject(signal?.reason instanceof Error ? signal.reason : /* @__PURE__ */ new Error("dsh-orb: overlay ack aborted"));
+				else resolve();
+			};
+			const timer = setTimeout(() => {
+				finish(false);
+			}, 1e3);
+			timer.unref();
+			const onAbort = () => {
+				finish(true);
+			};
+			if (signal?.aborted) {
+				finish(true);
+				return;
+			}
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.overlayWaiters.set(message.id, () => {
+				finish(false);
+			});
+			this.broadcast(message);
 		});
 	}
 	async applyOverlayQuiet(sessionId) {

@@ -9,5 +9,5 @@ export default defineConfig({
   fixedExtension: false,
   dts: true,
   clean: true,
-  deps: { neverBundle: ['@deepseek-ai/dsh-home-paths', 'koffi'] },
+  deps: { neverBundle: ['@deepseek-ai/dsh-home-paths', '@dsh-orb/native-selection', 'koffi'] },
 })

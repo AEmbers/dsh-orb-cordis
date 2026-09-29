@@ -13,7 +13,7 @@ const PANEL_WINDOW_SIZE = {
 const BELOW_CENTER = .08;
 const DOCK_OVERLAP = Math.round(72 / 5);
 const DOCK_DRAG_OFF = Math.round(24);
-function clamp(value, min, max) {
+function clamp$1(value, min, max) {
 	return Math.min(Math.max(value, min), Math.max(min, max));
 }
 function collapsedWindowBounds(ball) {
@@ -28,7 +28,7 @@ function isCollapsed(bounds) {
 	return bounds.width <= 96 && bounds.height <= 96;
 }
 function clampWindowOrigin(value, workOrigin, workSize, windowSize) {
-	return clamp(value, workOrigin - 12, workOrigin + workSize - windowSize + 12);
+	return clamp$1(value, workOrigin - 12, workOrigin + workSize - windowSize + 12);
 }
 /** Which left or right display edge the ball already overlaps by about one fifth of its width. */
 function dockSideForBallOrigin(ball, bounds) {
@@ -39,7 +39,7 @@ function dockSideForBallOrigin(ball, bounds) {
 }
 /** Hittable strip for a docked tab, flush with a display edge. */
 function dockedTabBounds(side, ballY, bounds) {
-	const y = clamp(Math.round(ballY - 8), bounds.y, bounds.y + bounds.height - 88);
+	const y = clamp$1(Math.round(ballY - 8), bounds.y, bounds.y + bounds.height - 88);
 	return {
 		x: side === "left" ? bounds.x : bounds.x + bounds.width - 34,
 		y,
@@ -64,8 +64,8 @@ function ballOriginFromWindow(bounds, direction) {
 /** Keep a 72px ball fully inside a work area. */
 function clampedBallOrigin(ball, workArea) {
 	return {
-		x: clamp(ball.x, workArea.x, workArea.x + workArea.width - 72),
-		y: clamp(ball.y, workArea.y, workArea.y + workArea.height - 72)
+		x: clamp$1(ball.x, workArea.x, workArea.x + workArea.width - 72),
+		y: clamp$1(ball.y, workArea.y, workArea.y + workArea.height - 72)
 	};
 }
 /** Collapsed origin on the work-area right edge, slightly below vertical center. */
@@ -97,7 +97,7 @@ function expandedOverlayBounds(ball, workArea) {
 	};
 }
 function clampBallY(ballY, bounds) {
-	return clamp(Math.round(ballY), bounds.y, bounds.y + bounds.height - 72);
+	return clamp$1(Math.round(ballY), bounds.y, bounds.y + bounds.height - 72);
 }
 function offScreenBallOrigin(side, ballY, bounds) {
 	const y = clampBallY(ballY, bounds);
@@ -109,7 +109,7 @@ function offScreenBallOrigin(side, ballY, bounds) {
 function insideBallOrigin(side, ballY, display) {
 	return {
 		x: side === "left" ? display.bounds.x + 5 : display.bounds.x + display.bounds.width - 72 - 5,
-		y: clamp(Math.round(ballY), display.workArea.y, display.workArea.y + display.workArea.height - 72)
+		y: clamp$1(Math.round(ballY), display.workArea.y, display.workArea.y + display.workArea.height - 72)
 	};
 }
 function staysDocked(side, cursorX, bounds) {
@@ -436,6 +436,380 @@ function contextMenuTemplate(state, zh, actions) {
 	];
 }
 //#endregion
+//#region src/overlay-geometry.ts
+/** Toolbar and observation-frame placement. No Electron import, so tests can run the same math. */
+const SELECTION_TOOLBAR_SIZE = {
+	width: 280,
+	height: 46
+};
+function clamp(value, min, max) {
+	return Math.min(Math.max(value, min), Math.max(min, max));
+}
+/** Toolbar sits just below the mouse-up point and stays inside the work area. */
+function selectionToolbarBounds(anchor, size = SELECTION_TOOLBAR_SIZE, workArea) {
+	return {
+		x: clamp(anchor.x, workArea.x, workArea.x + workArea.width - size.width),
+		y: clamp(anchor.y + 8, workArea.y, workArea.y + workArea.height - size.height),
+		width: size.width,
+		height: size.height
+	};
+}
+/**
+* Grow the toolbar window for the language menu.
+* The menu hangs below the bar when it fits, and above when it would leave the work area.
+*/
+function selectionToolbarMenuBounds(barOrigin, contentSize, workArea) {
+	const width = Math.max(1, Math.round(contentSize.width));
+	const height = Math.max(1, Math.round(contentSize.height));
+	const x = clamp(barOrigin.x, workArea.x, workArea.x + workArea.width - width);
+	if (barOrigin.y + height <= workArea.y + workArea.height || height <= SELECTION_TOOLBAR_SIZE.height) return {
+		x,
+		y: clamp(barOrigin.y, workArea.y, workArea.y + workArea.height - height),
+		width,
+		height
+	};
+	return {
+		x,
+		y: clamp(barOrigin.y + SELECTION_TOOLBAR_SIZE.height - height, workArea.y, workArea.y + workArea.height - height),
+		width,
+		height
+	};
+}
+function intersectRects(area, clip) {
+	const x = Math.max(area.x, clip.x);
+	const y = Math.max(area.y, clip.y);
+	const right = Math.min(area.x + area.width, clip.x + clip.width);
+	const bottom = Math.min(area.y + area.height, clip.y + clip.height);
+	const width = right - x;
+	const height = bottom - y;
+	if (width >= 1 && height >= 1) return {
+		x,
+		y,
+		width,
+		height
+	};
+	return {
+		x: clamp(area.x, clip.x, clip.x + clip.width - 1),
+		y: clamp(area.y, clip.y, clip.y + clip.height - 1),
+		width: 1,
+		height: 1
+	};
+}
+function edgePadding(inset) {
+	return {
+		glow: Math.max(0, Math.max(0, Math.round(inset)) - 8),
+		stroke: 8
+	};
+}
+/** Body glow and frame stroke that keep the inner hole on the observation rectangle. */
+function observationFramePadding(region, bounds) {
+	const left = edgePadding(region.x - bounds.x);
+	const top = edgePadding(region.y - bounds.y);
+	const right = edgePadding(bounds.x + bounds.width - (region.x + region.width));
+	const bottom = edgePadding(bounds.y + bounds.height - (region.y + region.height));
+	return {
+		glow: {
+			top: top.glow,
+			right: right.glow,
+			bottom: bottom.glow,
+			left: left.glow
+		},
+		stroke: {
+			top: top.stroke,
+			right: right.stroke,
+			bottom: bottom.stroke,
+			left: left.stroke
+		}
+	};
+}
+/** Inflate the observation rectangle by the stroke and glow, then clip to the work area. */
+function observationFramePlacement(region, workArea) {
+	const bounds = intersectRects({
+		x: Math.round(region.x - 36),
+		y: Math.round(region.y - 36),
+		width: Math.max(1, Math.round(region.width + 72)),
+		height: Math.max(1, Math.round(region.height + 72))
+	}, workArea);
+	const padding = observationFramePadding(region, bounds);
+	return {
+		bounds,
+		glow: padding.glow,
+		stroke: padding.stroke
+	};
+}
+function observationFrameCssScript(glow, stroke) {
+	return `(() => { const root = document.documentElement.style; ${[
+		["--glow-top", glow.top],
+		["--glow-right", glow.right],
+		["--glow-bottom", glow.bottom],
+		["--glow-left", glow.left],
+		["--stroke-top", stroke.top],
+		["--stroke-right", stroke.right],
+		["--stroke-bottom", stroke.bottom],
+		["--stroke-left", stroke.left]
+	].map(([name, value]) => `root.setProperty(${JSON.stringify(name)}, ${JSON.stringify(`${String(value)}px`)});`).join("")} })()`;
+}
+function pointInRect(point, bounds) {
+	return point.x >= bounds.x && point.y >= bounds.y && point.x < bounds.x + bounds.width && point.y < bounds.y + bounds.height;
+}
+//#endregion
+//#region src/overlays.ts
+/**
+* Selection toolbar and observation frame.
+* Both windows, like the ball, opt out of screen capture.
+*/
+async function attachOverlays(deps) {
+	const toolbar = openToolbar(fileURLToPath(new URL("../preload.cjs", import.meta.url)));
+	const frame = openFrame();
+	let barOrigin = {
+		x: 0,
+		y: 0
+	};
+	let language = "zh";
+	toolbar.webContents.on("did-finish-load", () => {
+		toolbar.webContents.send("orb:selection-state", { language });
+	});
+	ipcMain.handle("orb:selection-size", (_event, size) => {
+		if (!isSize(size) || toolbar.isDestroyed()) return { menuAbove: false };
+		const work = workAreaOf(barOrigin);
+		const bounds = selectionToolbarMenuBounds(barOrigin, size, work);
+		toolbar.setBounds(bounds);
+		return { menuAbove: bounds.y < barOrigin.y };
+	});
+	ipcMain.on("orb:selection-action", (_event, payload) => {
+		if (typeof payload !== "object" || payload === null) return;
+		const record = payload;
+		if (record.action !== "search" && record.action !== "translate" && record.action !== "send" && record.action !== "language") return;
+		deps.write({
+			type: "selection-action",
+			action: record.action,
+			...record.language === "zh" || record.language === "en" ? { language: record.language } : {}
+		});
+	});
+	await Promise.all([toolbar.loadFile(fileURLToPath(new URL("../assets/selection-toolbar.html", import.meta.url))), frame.loadFile(fileURLToPath(new URL("../assets/observation-frame.html", import.meta.url)))]);
+	function ack(id) {
+		if (typeof id === "string") deps.write({
+			type: "overlay-ack",
+			id
+		});
+	}
+	function hideToolbar() {
+		if (!toolbar.isDestroyed() && toolbar.isVisible()) toolbar.hide();
+	}
+	function raiseChrome() {
+		if (!frame.isDestroyed()) frame.setAlwaysOnTop(true, "floating");
+		if (!toolbar.isDestroyed()) toolbar.setAlwaysOnTop(true, "screen-saver");
+		const ball = deps.ball();
+		if (ball && !ball.isDestroyed()) ball.setAlwaysOnTop(true, "screen-saver");
+	}
+	return { deliver(message) {
+		if (typeof message !== "object" || message === null) return false;
+		const record = message;
+		if (record.type === "selection") {
+			if (typeof record.x !== "number" || typeof record.y !== "number") return true;
+			language = record.language === "en" ? "en" : "zh";
+			const work = workAreaOf({
+				x: record.x,
+				y: record.y
+			});
+			const bounds = selectionToolbarBounds({
+				x: record.x,
+				y: record.y
+			}, SELECTION_TOOLBAR_SIZE, work);
+			barOrigin = {
+				x: bounds.x,
+				y: bounds.y
+			};
+			if (!toolbar.isDestroyed()) {
+				toolbar.setBounds(bounds);
+				toolbar.showInactive();
+				toolbar.webContents.send("orb:selection-state", { language });
+				raiseChrome();
+			}
+			return true;
+		}
+		if (record.type === "selection-hide") {
+			hideToolbar();
+			return true;
+		}
+		if (record.type === "selection-pointer") {
+			if (typeof record.x !== "number" || typeof record.y !== "number") return true;
+			if (toolbar.isDestroyed() || !toolbar.isVisible() || !pointInRect({
+				x: record.x,
+				y: record.y
+			}, toolbar.getBounds())) hideToolbar();
+			return true;
+		}
+		if (record.type === "selection-language") {
+			language = record.language === "en" ? "en" : "zh";
+			if (!toolbar.isDestroyed()) toolbar.webContents.send("orb:selection-state", { language });
+			return true;
+		}
+		if (record.type === "selection-attach") {
+			const ball = deps.ball();
+			if (ball && !ball.isDestroyed() && typeof record.text === "string") {
+				ball.webContents.send("orb:attach", record.text);
+				ball.showInactive();
+			}
+			hideToolbar();
+			return true;
+		}
+		if (record.type === "overlay-input") {
+			const ball = deps.ball();
+			if (ball && !ball.isDestroyed()) {
+				if (record.active === true) ball.setIgnoreMouseEvents(true, { forward: true });
+				else ball.setIgnoreMouseEvents(false);
+			}
+			if (record.active === true) hideToolbar();
+			ack(record.id);
+			return true;
+		}
+		if (record.type === "observation-frame") {
+			showFrame(frame, record.bounds);
+			raiseChrome();
+			ack(record.id);
+			return true;
+		}
+		return false;
+	} };
+}
+function showFrame(frame, bounds) {
+	if (frame.isDestroyed()) return;
+	const region = readRect(bounds);
+	if (region === void 0) {
+		frame.hide();
+		return;
+	}
+	const dip = toDip(region);
+	const placement = observationFramePlacement(dip, workAreaOf({
+		x: dip.x + dip.width / 2,
+		y: dip.y + dip.height / 2
+	}));
+	frame.setBounds(placement.bounds);
+	frame.webContents.executeJavaScript(observationFrameCssScript(placement.glow, placement.stroke)).catch(() => {});
+	frame.showInactive();
+}
+function toDip(region) {
+	if (process.platform !== "win32") return region;
+	const dip = screen.screenToDipRect(null, {
+		x: Math.round(region.x),
+		y: Math.round(region.y),
+		width: Math.round(region.width),
+		height: Math.round(region.height)
+	});
+	return {
+		x: dip.x,
+		y: dip.y,
+		width: dip.width,
+		height: dip.height
+	};
+}
+function workAreaOf(point) {
+	const area = screen.getDisplayNearestPoint({
+		x: Math.round(point.x),
+		y: Math.round(point.y)
+	}).workArea;
+	return {
+		x: area.x,
+		y: area.y,
+		width: area.width,
+		height: area.height
+	};
+}
+function readRect(value) {
+	if (typeof value !== "object" || value === null) return void 0;
+	const record = value;
+	if (typeof record.x !== "number" || typeof record.y !== "number" || typeof record.width !== "number" || typeof record.height !== "number") return;
+	if (![
+		record.x,
+		record.y,
+		record.width,
+		record.height
+	].every(Number.isFinite)) return void 0;
+	if (record.width < 1 || record.height < 1) return void 0;
+	return {
+		x: record.x,
+		y: record.y,
+		width: record.width,
+		height: record.height
+	};
+}
+function isSize(value) {
+	if (typeof value !== "object" || value === null) return false;
+	const size = value;
+	return typeof size.width === "number" && typeof size.height === "number" && Number.isFinite(size.width) && Number.isFinite(size.height) && size.width > 0 && size.height > 0 && size.width < 2e3 && size.height < 2e3;
+}
+function openToolbar(preload) {
+	const created = new BrowserWindow({
+		width: SELECTION_TOOLBAR_SIZE.width,
+		height: SELECTION_TOOLBAR_SIZE.height,
+		frame: false,
+		transparent: true,
+		alwaysOnTop: true,
+		resizable: false,
+		movable: false,
+		minimizable: false,
+		maximizable: false,
+		fullscreenable: false,
+		skipTaskbar: true,
+		focusable: false,
+		show: false,
+		hasShadow: true,
+		backgroundColor: "#00000000",
+		roundedCorners: false,
+		...process.platform === "darwin" ? { type: "panel" } : {},
+		webPreferences: {
+			preload,
+			contextIsolation: true,
+			nodeIntegration: false,
+			sandbox: true
+		}
+	});
+	protect(created, "screen-saver");
+	return created;
+}
+function openFrame() {
+	const created = new BrowserWindow({
+		width: 32,
+		height: 32,
+		frame: false,
+		transparent: true,
+		alwaysOnTop: true,
+		resizable: false,
+		movable: false,
+		minimizable: false,
+		maximizable: false,
+		fullscreenable: false,
+		skipTaskbar: true,
+		focusable: false,
+		show: false,
+		hasShadow: false,
+		backgroundColor: "#00000000",
+		roundedCorners: false,
+		...process.platform === "darwin" ? { type: "panel" } : {},
+		webPreferences: {
+			contextIsolation: true,
+			nodeIntegration: false,
+			sandbox: true
+		}
+	});
+	protect(created, "floating");
+	created.setIgnoreMouseEvents(true, { forward: true });
+	return created;
+}
+function protect(created, level) {
+	created.setContentProtection(true);
+	created.setAlwaysOnTop(true, level);
+	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
+		visibleOnFullScreen: true,
+		skipTransformProcessType: true
+	});
+	created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+	created.webContents.on("will-navigate", (event) => {
+		event.preventDefault();
+	});
+}
+//#endregion
 //#region src/main.ts
 /**
 * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
@@ -463,6 +837,7 @@ if (!socketAddress || !token) {
 }
 if (process.platform === "darwin") app.setActivationPolicy?.("accessory");
 let win;
+let overlays;
 let placement;
 let live;
 let quitting = false;
@@ -477,6 +852,14 @@ app.on("window-all-closed", () => {
 app.whenReady().then(async () => {
 	if (process.platform === "darwin") app.dock?.hide();
 	win = openWindow();
+	try {
+		overlays = await attachOverlays({
+			ball: () => win,
+			write
+		});
+	} catch (error) {
+		console.error(`dsh-orb helper: overlays did not open: ${error instanceof Error ? error.message : String(error)}`);
+	}
 	placement = new FloatingPlacement(win, (point) => {
 		const display = screen.getDisplayNearestPoint({
 			x: Math.round(point.x),
@@ -608,6 +991,9 @@ function openWindow() {
 	created.webContents.on("will-navigate", (event) => {
 		event.preventDefault();
 	});
+	created.on("closed", () => {
+		if (!quitting) app.quit();
+	});
 	created.once("ready-to-show", () => {
 		created.showInactive();
 		created.setContentProtection(true);
@@ -633,7 +1019,8 @@ function connect(attempt) {
 		buffer = "";
 		socket.write(`${JSON.stringify({
 			type: "hello",
-			token
+			token,
+			pid: process.pid
 		})}\n`);
 	});
 	socket.on("data", (chunk) => {
@@ -668,6 +1055,7 @@ function connect(attempt) {
 	});
 }
 function deliver(message) {
+	if (overlays?.deliver(message)) return;
 	if (typeof message !== "object" || message === null || !win) return;
 	const record = message;
 	if (record.type === "session") {

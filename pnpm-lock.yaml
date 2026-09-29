@@ -85,6 +85,9 @@ importers:
       '@dsh-orb/helper':
         specifier: file:../helper
         version: link:../helper
+      '@dsh-orb/native-selection':
+        specifier: file:../native-selection
+        version: link:../native-selection
       koffi:
         specifier: ^3.1.0
         version: 3.3.1
@@ -92,6 +95,12 @@ importers:
       '@deepseek-ai/dsh-home-paths':
         specifier: 0.1.7-rc.2
         version: 0.1.7-rc.2(@deepseek-ai/cordis@4.0.4)
+
+  packages/native-selection:
+    dependencies:
+      koffi:
+        specifier: ^3.1.0
+        version: 3.3.1
 
 packages:
 

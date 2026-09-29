@@ -120,6 +120,18 @@ export class ProfileStore {
     return this.selectionValue
   }
 
+  translateLanguage(): 'zh' | 'en' {
+    return this.selectionLanguage
+  }
+
+  setTranslateLanguage(language: 'zh' | 'en'): void {
+    this.selectionLanguage = language
+    writeJson(join(this.dir, SELECTION_FILE), {
+      enabled: this.selectionValue,
+      translateTargetLanguage: language,
+    })
+  }
+
   setSelectionEnabled(enabled: boolean): void {
     this.selectionValue = enabled
     writeJson(join(this.dir, SELECTION_FILE), {
