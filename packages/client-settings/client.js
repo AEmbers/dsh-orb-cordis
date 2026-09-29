@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
       helperFailed: '悬浮球多次退出，已经停止重试。关闭后再打开可再试一次。',
       runtimeFailed: '悬浮球运行时没有下载成功。关闭后再打开可再试一次。',
       selectionUnavailable: '划词不可用。',
+      permissionFallback: '权限设置无法读取，已改为工作区内修改。',
       retry: '重试',
       ball: '启用悬浮球',
       ballDescription: '关闭后插件仍在，Computer Use 仍可在主窗口使用。',
@@ -63,6 +64,7 @@ window.__ModuleLoader__.load({
       helperFailed: 'The floating ball exited too many times and stopped retrying. Turn it off and on to try again.',
       runtimeFailed: 'The floating-ball runtime did not download. Turn it off and on to try again.',
       selectionUnavailable: 'Selection is unavailable.',
+      permissionFallback: 'The permission file could not be read. Access is now Workspace Write.',
       retry: 'Retry',
       ball: 'Enable the floating ball',
       ballDescription: 'Turning this off keeps the plugin loaded. Computer Use stays available in the main window.',
@@ -290,6 +292,9 @@ window.__ModuleLoader__.load({
           : null,
         snap.supported ? null : h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.linux),
         helperNotice(text, snap),
+        snap.permissionFallback === true
+          ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.permissionFallback)
+          : null,
         snap.supported && snap.selectionAvailable === false
           ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.selectionUnavailable)
           : null,

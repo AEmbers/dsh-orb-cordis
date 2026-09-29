@@ -73,17 +73,17 @@ helper 不使用 `/Applications/DeepSeek Harness.app` 里的可执行文件。�
 | 源文件 | 处理 |
 |---|---|
 | `apps/desktop/src/floating-window.ts` | 去掉对官方 `main`、`ipc`、`paths` 的依赖。`presentOverlayWindow` 一并搬，工具条和观察框复用它 |
-| `apps/desktop/renderer/floating.html`、`floating.css`、`floating.js` | 搬进来。`window.dshDesktop` 由 helper 的 preload 提供。`dsh-app://app/api/...` 改成官方鉴权基址，或由 helper 注册的 `dsh-app` 转发到该基址。转发时 `floating.js` 可以少改 |
-| `apps/desktop/src/preload.ts` | 按原 API 用 `contextBridge` 复刻。`floating.js` 第 1 行就是 `window.dshDesktop` |
+| `apps/desktop/renderer/floating.html`、`floating.css`、`floating.js` | 页面搬进来，改成 helper 自己的 `shell.js`。不嵌官方 SPA，所以不复刻 `window.dshDesktop` |
+| `apps/desktop/src/preload.ts` | 不按原 API 整份复刻。球的 preload 暴露 `window.dshOrb`。划词工具条用另一份 preload，只暴露 `selection` |
 | `apps/desktop/src/floating-agent-menu.ts` | `quit` 改为停用悬浮球。`focusMain` 在 macOS 上打开 `dsh://open` |
 | `selection-toolbar-window.ts`、`observation-frame-window.ts` 及对应 renderer | 原样搬 |
 | 头像 GIF 等静态资源 | 原样搬 |
 
-preload 里需要跨进程的成员走控制通道，问 Host：会话 id、权限、模型、头像、工作区路径、TCC 状态、划词动作、locale。窗口几何、展开、穿透、编辑态留在 helper 进程内。
+preload 里需要跨进程的成员走控制 socket，问 Host：会话、权限、模型、TCC 状态、划词动作。窗口几何、展开、穿透、编辑态留在 helper 进程内。
 
-`floating` 的 25 个成员、`selection` 的 7 个、`backend` 的 2 个，以及 `protocolVersion` 和 `locale()`，与源 `preload.ts` 对齐。官方主窗口的 preload 我们改不了，所以这张脸只出现在 helper 的页面里。
+球的页面是 helper 自己的，不是官方主窗口那一页，所以 API 叫 `window.dshOrb`，不叫 `dshDesktop`。官方主窗口的 preload 我们改不了。设置页不靠这个对象，走 HTTP。
 
-对话记录做在 helper 页面里，使用官方会话 API。不装 `ui-overlay-chat`，也不请求 `index.html?surface=overlay`。
+对话记录做在 helper 页面里。Host 读官方会话存储，经控制 socket 把块推过来。不装 `ui-overlay-chat`，也不请求 `index.html?surface=overlay`。头像由 Host 存文件；helper 带本次 token 去取，再交给页面。页面的 CSP 不允许它自己去打带凭据的地址。
 
 ### 3.3 进 `@dsh-orb/computer-use`
 
@@ -103,7 +103,7 @@ fork 对 `packages/client/ui-layout`、`packages/client/ui-chat`、`packages/api
 
 1. 环境变量 `DSH_ORB_ELECTRON_PATH` 指向一个未打包的 Electron 可执行文件。开发时用。
 2. 已经下载过的副本：`dshHomePath('dsh-orb', 'electron-runtime')`。
-3. 否则从 Electron 的官方发布物下载与我们锁定的版本一致的 dist zip，用该版本的 `SHASUMS256.txt` 校验后解压。桌面版和 `dsh web` 走同一步。语音输入 bundle 的「首次使用再下载运行时」是这个模式的先例。
+3. 否则从 Electron 的官方发布物下载与我们锁定的版本一致的 dist zip。源码里钉死了该版本 darwin、win32、linux 的 arm64 和 x64 共六个包的 SHA256。下载到的 `SHASUMS256.txt` 必须和钉死的值一致，zip 再对这个值校验。桌面版和 `dsh web` 走同一步。语音输入 bundle 的「首次使用再下载运行时」是这个模式的先例。
 
 启动参数：
 
@@ -124,19 +124,19 @@ Host 听 `127.0.0.1:0`，生成本次启动专用的 32 字节 token，经环境
 
 ### 5.2 数据面
 
-Host 在自己的进程里读取：
+Host 在自己的进程里读 `ctx.sessionController` 和会话存储，不把带凭据的 URL 交给 helper。球的发送、历史、模型、权限都是控制 socket 上的一条消息。转录用大约 400ms 的轮询把新事件推到球上，不走官方的 `$events` 流。轮询够用，也避免 helper 持有鉴权 URL。
 
-```ts
-ctx.connection.authenticatedUrl(`http://127.0.0.1:${String(ctx.webServer.port)}`)
-```
+设置读写和头像下载用 `ctx.webServer.register` 挂在官方端口上。头像请求要带本次启动的 token 头。
 
-握手时把这个基址交给 helper。球的 `session/create`、`session/prompt`、`session/list`、`session/cancel`、`session/selectModel`、`workspace/create`、`$events/result`，以及 `$events` 流，都打到这个基址。鉴权用官方 URL 里已经带上的凭据。
+权限文件 `orb-permission.json` 不存在时用完全访问，因为球的主要用途是操作界面。文件在但读不出来或取值非法时，降为工作区内修改，并在设置页提示。
 
-我们额外的路由（设置读写、头像上传）用 `ctx.webServer.register` 挂在同一端口上。
+球正在显示提问卡时，helper 断开或 Host 停掉球，这道题交回主窗口回答，不直接拒绝。用户点放弃，或提问被 abort，才拒绝。
+
+Windows 划词的低级钩子装在 worker 线程里，由那个线程跑 `GetMessageW`。Host 的主线程没有 Windows 消息循环。
 
 ### 5.3 设置页
 
-`ui-settings-orb` 今天通过 `window.dshDesktop.orb` 读写。官方主窗口没有这个对象，`readDesktopAppApi()` 返回 undefined，设置节会消失。
+fork 的设置页通过 `window.dshDesktop.orb` 读写。官方主窗口没有这个对象，设置节会消失。
 
 client 插件改为 `fetch` 上面的路由。类型 `OrbSettingsSnapshot`、`TccStatus` 保持不变。选择头像时，页面用 `<input type="file">` 上传；桌面端也可以让 helper 打开系统文件框，再走同一条上传路由。
 

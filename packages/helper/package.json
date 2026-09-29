@@ -8,11 +8,13 @@
   "exports": {
     ".": "./lib/main.js",
     "./package.json": "./package.json",
-    "./preload.cjs": "./preload.cjs"
+    "./preload.cjs": "./preload.cjs",
+    "./selection-preload.cjs": "./selection-preload.cjs"
   },
   "files": [
     "lib",
     "preload.cjs",
+    "selection-preload.cjs",
     "assets"
   ],
   "scripts": {

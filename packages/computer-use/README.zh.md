@@ -3,7 +3,7 @@ description: "可选的实验性 GUI 工具，让视觉模型点击、输入、�
 kind: "package-reference"
 ---
 
-# @deepseek-ai/dsh-experimental-tool-computer-use
+# @dsh-orb/computer-use
 
 [English](README.md) | 中文
 
@@ -47,7 +47,7 @@ pnpm dsh web --patch packages/experimental/tool-computer-use/cordis.source.patch
 
 ```yaml
 - id: tool-computer-use
-  name: '@deepseek-ai/dsh-experimental-tool-computer-use'
+  name: '@dsh-orb/computer-use'
   config:
     postActionWaitMs: 600
 ```
@@ -56,7 +56,7 @@ pnpm dsh web --patch packages/experimental/tool-computer-use/cordis.source.patch
 |---|---|---|
 | `postActionWaitMs` | `600` | GUI 动作之后、inspect 与截取像素之前等待的毫秒数 |
 
-生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-experimental-tool-computer-use)是每个受支持字段及其 JSDoc 的穷尽式真源。
+上表是受支持的配置字段。
 
 在 macOS 上，截屏需要屏幕录制权限，发送点击与按键需要辅助功能权限，Finder 当前文件夹查询需要访达的自动化权限。Desktop overlay 会在 overlay 发送前盖住屏幕录制与辅助功能；若执行时仍缺权限，捕获或输入会失败，并在消息中指出对应的 TCC 权限。访达自动化在第一次使用时弹出。Windows 用 GDI 截屏并用 `SendInput` 发送输入，两者都在每监视器物理像素上，因此截图上的位置会落到混合 DPI 布局里每一块显示器的对应像素。以管理员身份运行的目标窗口会拒绝点击和输入。Linux 仍会加载，随后每个后端方法都会抛出 `computer-use: desktop control is implemented only on macOS and Windows`。
 
@@ -140,33 +140,7 @@ Desktop 上新建 `code_agent` 会在 `session.create` 之后、`session.prompt`
 <a id="further-exploration"></a>
 ## 进一步探索
 
-- [实验组](../README.zh.md) — 私有原型与公开的 Agent Teams 例外。
-- [生成的工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-experimental-tool-computer-use) — 十三个 GUI schema 与 `code_agent` 一族。
-- [添加工具](../../../docs/cookbook/adding-a-tool.zh.md) — UI 呈现意图（`generic`）与内容中的图片块。
-- [Computer Use Agent Note](../../../.agents/notes/implemented/feature/2026-09-13-experimental-computer-use.zh.md) — 插件 vs Skill vs loop、Computer Use agent preset、结果内观察，以及同意门槛。
-- [Computer Use 指针与打开工具](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-pointer-and-open-tools.zh.md) — `long_press`、`drag`、`open_in_browser`、`open_in_finder`、overlay-guard 分流，以及路径/URL 拒绝。
-- [Computer Use 单击修饰键](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-click-modifiers.zh.md) — 仅在该次单击期间按住的可选 click 修饰键。
-- [Computer Use 的 wait 与 long_wait](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-wait-and-long-wait.zh.md) — 固定 1 秒的 `wait`、`long_wait` 分档，以及为何 10 秒下限不是 Config。
-- [Computer Use 截图导出](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-screenshot.zh.md) — 桌面文件加剪贴板，不是 observe 工具。
-- [Computer Use 跳过退化截图栅格](../../../.agents/notes/implemented/bug-fix/2026-09-19-computer-use-screenshot-degenerate-raster.zh.md) — `screenshot` 丢弃不足 2 像素的捕获，bash 之后可以刷新。
-- [Computer Use 把 Code agent 完成通知停到空闲再投递](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-code-agent-completion.zh.md) — 两边都空闲后投递的插件通知。
-- [Overlay Computer Use 后台调度](../../../.agents/notes/implemented/feature/2026-09-17-orb-code-agent-dispatch.zh.md) — 子目录 cwd、调用方登记表、status/stop，以及 Code agent 上的无人值守应答。
-- [Computer Use 观察前台元数据](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-observation-foreground.zh.md) — overlay 窗口排除、Finder 文件夹，以及现有 `user/message` / `tool/result` 上的焦点 fallback。
-- [Computer Use 焦点窗口观察](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-focused-window-observation.zh.md) — 跳过 overlay 后的最前窗口、`list_apps` / `open_app`，以及不附整桌面全景。
-- [Windows Computer Use 每监视器坐标](../../../.agents/notes/implemented/architecture/2026-09-23-windows-computer-use-per-monitor-dpi.zh.md) — 捕获与 `SendInput` 使用物理像素、跳过 overlay HWND，以及同一监视器上的菜单。
-- [Windows Computer Use 焦点恢复](../../../.agents/notes/implemented/bug-fix/2026-09-23-windows-computer-use-focus-recovery.zh.md) — 报告的窗口不是键盘前台时的 `<focus_note>`，以及 `hotkey` 在按键前恢复该窗口。
-- [Computer Use 应用窗口观察](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-app-window-observation.zh.md) — 前台应用族窗口并集与始终区域捕获。
-- [Computer Use 瞬时窗口观察](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-transient-window-observation.zh.md) — 该并集矩形的区域 helper。
-- [Computer Use 右键菜单观察](../../../.agents/notes/implemented/bug-fix/2026-09-16-computer-use-context-menu-observation.zh.md) — 先等待再 inspect，以及 recapture 期间的 overlay input 遮蔽。
-- [Computer Use 0–1000 比例坐标](../../../.agents/notes/implemented/bug-fix/2026-09-15-computer-use-fraction-coordinates.zh.md) — 默认千分比编码：模型侧 0–1000 是可见截图上的比例，不是捕获像素。
-- [Overlay 会话上的 Computer Use 千分比与像素坐标模式](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-session-coordinate-modes.zh.md) — 按会话的点击编码、Desktop 确认后创建，以及像素附件 WxH。
-- [图片句柄省略请求预览像素](../../../.agents/notes/implemented/bug-fix/2026-09-15-omit-request-preview-handle-dimensions.zh.md) — 共用图片句柄只写身份，不写请求预览宽高。
-- [桌面悬浮球](../../../.agents/notes/implemented/feature/2026-09-14-desktop-floating-orb.zh.md) — macOS overlay、runtime extra，以及一等 `code_agent` 会话。
-- [悬浮球 Agent 模型菜单](../../../.agents/notes/implemented/feature/2026-09-17-orb-agent-model-menus.zh.md) — overlay 与后台模型持久化、`saveAsDefault: false`、仅新建时应用到 `code_agent`。
-- [桌面 overlay-guard](../../../.agents/notes/implemented/architecture/2026-09-14-desktop-overlay-guard.zh.md) — 悬浮球的截屏排除与 HID 点击穿透。
-- [Desktop 在 Orb 进程内做 ScreenCaptureKit](../../../.agents/notes/implemented/architecture/2026-09-20-desktop-sck-in-process-identity.zh.md) — 排除 overlay 的捕获跑在 Electron 里，屏幕录制只剩带图标的 DeepSeek Orb。
-- [Computer Use 观察框彩带](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-observation-frame.zh.md) — 观察并集四边的仅给人看的 chrome；ScreenCaptureKit 省略；从不进图。
-- [Headless computer-use snapshot](../../../snapshots/session/computer-use/snapshot.yml) — 在假桌面与视觉模型上人工编写的点击循环。
+工具和源码在这个包里。这里不附带 fork 的笔记链接。
 
 -----
 
@@ -246,7 +220,7 @@ Keyboard focus is on another window. hotkey brings this window forward first; cl
 
 #### 模型看到什么
 
-模型看到生成的 [`click`、`input_text`、`scroll`、`hotkey`、`wait`、`long_wait`、`screenshot`、`long_press`、`drag`、`open_in_browser`、`open_in_finder`、`list_apps`、`open_app`、`code_agent`、`code_agent_status` 与 `code_agent_stop` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-experimental-tool-computer-use)。没有 observe 工具。纯文本路由仍会收到 GUI schema，并在执行时被拒绝。`code_agent` 一族只注册在 Computer Use preset 中。
+模型看到 `click`、`input_text`、`scroll`、`hotkey`、`wait`、`long_wait`、`screenshot`、`long_press`、`drag`、`open_in_browser`、`open_in_finder`、`list_apps`、`open_app`、`code_agent`、`code_agent_status` 与 `code_agent_stop`。没有 observe 工具。纯文本路由仍会收到 GUI schema，并在执行时被拒绝。`code_agent` 一族只注册在 Computer Use preset 中。
 
 #### Token 影响
 

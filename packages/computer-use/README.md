@@ -3,7 +3,7 @@ description: "Opt-in experimental GUI tools that let a vision model click, type,
 kind: "package-reference"
 ---
 
-# @deepseek-ai/dsh-experimental-tool-computer-use
+# @dsh-orb/computer-use
 
 English | [中文](README.zh.md)
 
@@ -47,7 +47,7 @@ A custom Loader composition that can resolve the package name may instead mount:
 
 ```yaml
 - id: tool-computer-use
-  name: '@deepseek-ai/dsh-experimental-tool-computer-use'
+  name: '@dsh-orb/computer-use'
   config:
     postActionWaitMs: 600
 ```
@@ -56,7 +56,7 @@ A custom Loader composition that can resolve the package name may instead mount:
 |---|---|---|
 | `postActionWaitMs` | `600` | Milliseconds to wait after a GUI action before inspect and pixel capture |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-experimental-tool-computer-use) is the exhaustive source for every accepted field and its JSDoc.
+The table above is the list of accepted config fields.
 
 On macOS, grant Screen Recording to capture, Accessibility to post clicks and keys, and Automation for Finder. Desktop's overlay covers Screen Recording and Accessibility before overlay send; the plugin still fails capture or input with a message that names that TCC right if a right is missing at execute. Finder Automation prompts on first use. Windows captures with GDI and posts input with `SendInput`, both in per-monitor physical pixels, so a position on the screenshot lands on that pixel on every display in a mixed-DPI layout. An elevated target window rejects clicks and typing. Linux still loads, and every backend method then throws `computer-use: desktop control is implemented only on macOS and Windows`.
 
@@ -140,33 +140,7 @@ Desktop `code_agent` create reads optional `ctx.get('orbCodeAgentModel')` after 
 <a id="further-exploration"></a>
 ## Further Exploration
 
-- [Experimental group](../README.md) — private prototypes and the public Agent Teams exceptions.
-- [Generated tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-experimental-tool-computer-use) — the thirteen GUI schemas and the `code_agent` family.
-- [Adding a tool](../../../docs/cookbook/adding-a-tool.md) — UI render intent (`generic`) and image blocks in content.
-- [Computer Use Agent Note](../../../.agents/notes/implemented/feature/2026-09-13-experimental-computer-use.md) — plugin vs Skill vs loop, the Computer Use agent preset, observation-in-result, and the consent gate.
-- [Computer Use pointer and open tools](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-pointer-and-open-tools.md) — `long_press`, `drag`, `open_in_browser`, `open_in_finder`, overlay-guard split, and path/URL rejects.
-- [Computer Use click modifiers](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-click-modifiers.md) — optional click modifiers held only for that click.
-- [Computer Use wait and long_wait](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-wait-and-long-wait.md) — fixed 1s `wait`, `long_wait` buckets, and why the 10s floor is not Config.
-- [Computer Use screenshot export](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-screenshot.md) — Desktop file plus clipboard, not an observe tool.
-- [Computer Use skips degenerate screenshot rasters](../../../.agents/notes/implemented/bug-fix/2026-09-19-computer-use-screenshot-degenerate-raster.md) — `screenshot` drops sub-2px captures and may refresh after bash.
-- [Computer Use parks Code agent completion](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-code-agent-completion.md) — parked plugin notice after both sessions are idle.
-- [Overlay Computer Use background dispatch](../../../.agents/notes/implemented/feature/2026-09-17-orb-code-agent-dispatch.md) — subdirectory cwd, caller-owned registry, status/stop, and unattended Code-agent answerers.
-- [Computer Use observation foreground](../../../.agents/notes/implemented/feature/2026-09-15-computer-use-observation-foreground.md) — overlay-window skip, Finder folder, and focus fallback on existing `user/message` / `tool/result`.
-- [Computer Use focused-window observation](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-focused-window-observation.md) — one overlay-skipped frontmost window, `list_apps` / `open_app`, and no desktop panorama.
-- [Windows Computer Use per-monitor coordinates](../../../.agents/notes/implemented/architecture/2026-09-23-windows-computer-use-per-monitor-dpi.md) — physical pixels for capture and `SendInput`, overlay HWND skip, and same-monitor menus.
-- [Windows Computer Use focus recovery](../../../.agents/notes/implemented/bug-fix/2026-09-23-windows-computer-use-focus-recovery.md) — `<focus_note>` when the reported window is not the keyboard foreground, and `hotkey` restores that window before keys.
-- [Computer Use app-window observation](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-app-window-observation.md) — frontmost-app family window union and always-region capture.
-- [Computer Use transient window observation](../../../.agents/notes/implemented/feature/2026-09-16-computer-use-transient-window-observation.md) — region helper for that union rectangle.
-- [Computer Use context-menu observation](../../../.agents/notes/implemented/bug-fix/2026-09-16-computer-use-context-menu-observation.md) — settle-before-inspect and overlay input cloak through recapture.
-- [Computer Use 0–1000 fraction coordinates](../../../.agents/notes/implemented/bug-fix/2026-09-15-computer-use-fraction-coordinates.md) — default millifraction encoding: model-facing 0–1000 is a fraction of the visible screenshot, not capture pixels.
-- [Overlay Computer Use millifraction and pixel coordinate modes](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-session-coordinate-modes.md) — per-session click encoding, Desktop confirm-then-create, and pixel attached WxH.
-- [Image handle omits request-preview pixels](../../../.agents/notes/implemented/bug-fix/2026-09-15-omit-request-preview-handle-dimensions.md) — the shared image handle names identity, not request-preview width and height.
-- [Desktop floating orb](../../../.agents/notes/implemented/feature/2026-09-14-desktop-floating-orb.md) — macOS overlay, runtime extra, and first-class `code_agent` sessions.
-- [Floating-ball Agent model menus](../../../.agents/notes/implemented/feature/2026-09-17-orb-agent-model-menus.md) — overlay and background model persistence, `saveAsDefault: false`, create-only `code_agent` apply.
-- [Desktop overlay guard](../../../.agents/notes/implemented/architecture/2026-09-14-desktop-overlay-guard.md) — capture exclusion and HID click-through for the floating ball.
-- [Desktop ScreenCaptureKit in the Orb process](../../../.agents/notes/implemented/architecture/2026-09-20-desktop-sck-in-process-identity.md) — overlay-exclude capture in Electron so Screen Recording is one DeepSeek Orb row.
-- [Computer Use observation-frame ribbon](../../../.agents/notes/implemented/feature/2026-09-19-computer-use-observation-frame.md) — human-only chrome around the observation union; ScreenCaptureKit omit; never in the shot.
-- [Headless computer-use snapshot](../../../snapshots/session/computer-use/snapshot.yml) — authored click loop over a fake desktop and a vision model.
+The tools and their source files in this package are the reference. Fork notes are not shipped here.
 
 -----
 
@@ -246,7 +220,7 @@ Prefix-stable while the policy text and tool schemas remain unchanged. First-fra
 
 #### What the model sees
 
-The model sees the generated [`click`, `input_text`, `scroll`, `hotkey`, `wait`, `long_wait`, `screenshot`, `long_press`, `drag`, `open_in_browser`, `open_in_finder`, `list_apps`, `open_app`, `code_agent`, `code_agent_status`, and `code_agent_stop` schemas](../../../docs/tool-catalog.md#deepseek-aidsh-experimental-tool-computer-use). There is no observe tool. Text-only routes still receive the GUI schemas and are refused at execute. The `code_agent` family is registered only in the Computer Use preset.
+The model sees `click`, `input_text`, `scroll`, `hotkey`, `wait`, `long_wait`, `screenshot`, `long_press`, `drag`, `open_in_browser`, `open_in_finder`, `list_apps`, `open_app`, `code_agent`, `code_agent_status`, and `code_agent_stop`. There is no observe tool. Text-only routes still receive the GUI schemas and are refused at execute. The `code_agent` family is registered only in the Computer Use preset.
 
 #### Token effect
 

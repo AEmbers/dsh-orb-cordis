@@ -16,6 +16,9 @@ declare module 'electron' {
     setWindowOpenHandler(handler: () => { action: 'deny' }): void
     on(event: 'will-navigate' | 'did-finish-load' | 'context-menu', listener: (event: { preventDefault(): void }, params?: { isEditable?: boolean }) => void): void
     executeJavaScript(code: string): Promise<unknown>
+    session: {
+      setPermissionRequestHandler(handler: (contents: WebContents, permission: string, callback: (granted: boolean) => void) => void): void
+    }
   }
 
   interface BrowserWindow {

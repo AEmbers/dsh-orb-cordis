@@ -23,6 +23,7 @@ describe('profile preferences', () => {
   it('uses the shipped defaults when the profile files are missing', () => {
     const store = new ProfileStore(dir('empty'))
     assert.equal(store.permission(), 'danger-full-access')
+    assert.equal(store.permissionFallback(), false)
     assert.deepEqual(store.models().overlay, {
       provider: 'deepseek-official',
       model: 'deepseek-flash',
@@ -88,6 +89,15 @@ describe('profile preferences', () => {
     writeFileSync(join(path, 'orb-avatar.json'), JSON.stringify({ mime: 'image/gif' }))
     assert.equal(new ProfileStore(path).readAvatar(), undefined)
     store.restoreAvatar()
+    writeFileSync(join(path, 'orb-permission.json'), '{')
+    const broken = new ProfileStore(path)
+    assert.equal(broken.permission(), 'workspace-write')
+    assert.equal(broken.permissionFallback(), true)
+    writeFileSync(join(path, 'orb-permission.json'), JSON.stringify({ preset: 'nope' }))
+    assert.equal(new ProfileStore(path).permissionFallback(), true)
+    broken.setPermission('read-only')
+    assert.equal(new ProfileStore(path).permission(), 'read-only')
+    assert.equal(new ProfileStore(path).permissionFallback(), false)
     assert.equal(store.readAvatar(), undefined)
     assert.equal(store.avatarVersion(), 0)
   })

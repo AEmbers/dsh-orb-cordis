@@ -206,6 +206,7 @@ async function snapshot(deps: RouteDeps): Promise<{
   tcc: TccStatus
   helperError: string
   selectionAvailable: boolean
+  permissionFallback: boolean
 }> {
   const models = deps.store.models()
   const version = Math.trunc(deps.store.avatarVersion())
@@ -220,6 +221,7 @@ async function snapshot(deps: RouteDeps): Promise<{
     tcc: deps.tcc.status(),
     helperError: deps.control.helperStatus?.() ?? '',
     selectionAvailable: selectionRuntimeAvailable(),
+    permissionFallback: deps.store.permissionFallback(),
   }
 }
 

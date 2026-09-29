@@ -132,6 +132,7 @@ describe('settings routes', () => {
       ballEnabled: boolean
       overlay: { model: string }
       supported: boolean
+      permissionFallback: boolean
     }
     assert.equal(settings.status, 200)
     assert.equal(snapshot.avatarUrl, '/.dsh-orb/avatar?v=0')
@@ -139,6 +140,7 @@ describe('settings routes', () => {
     assert.equal(snapshot.ballEnabled, true)
     assert.equal(snapshot.overlay.model, 'deepseek-flash')
     assert.equal(snapshot.supported, process.platform === 'darwin' || process.platform === 'win32')
+    assert.equal(snapshot.permissionFallback, false)
 
     const models = response()
     await handler(request('GET', '/.dsh-orb/models', undefined, { 'x-dsh-user': 'ok' }), models)

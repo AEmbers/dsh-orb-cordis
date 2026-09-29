@@ -34,7 +34,7 @@ export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): vo
   logWebPort(ctx)
   const store = new ProfileStore(profileDirectory(ctx))
   const tcc = new TccMonitor()
-  const runtime = new OrbRuntime(ctx, store)
+  const runtime = new OrbRuntime(ctx, store, { tcc })
   installOrbServices(ctx, store)
   console.error(`dsh-orb: profile ${store.dir}`)
   ctx.effect(() => {

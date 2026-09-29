@@ -1,3 +1,4 @@
+import { renderMarkdown } from './markdown.js'
 import { processLabel, reasoningSummary } from './transcript-model.js'
 
 const api = window.dshOrb
@@ -35,6 +36,23 @@ const zh = {
   running: '运行中',
   tooLong: '最多 8000 个字符，已保留输入。',
   truncated: '已截断',
+  chipDismiss: '移除',
+  tccTitle: '使用桌面 agent 需要两项 Mac 权限',
+  tccAppHint: '在列表里打开 {name}。',
+  tccScreenName: '屏幕录制',
+  tccScreenReason: '让 agent 看见当前窗口。',
+  tccScreenPath: '系统设置 → 隐私与安全性 → 屏幕录制',
+  tccScreenOpen: '打开「屏幕录制」设置',
+  tccAccessibilityName: '辅助功能',
+  tccAccessibilityReason: '让 agent 点击和输入。',
+  tccAccessibilityPath: '系统设置 → 隐私与安全性 → 辅助功能',
+  tccAccessibilityOpen: '打开「辅助功能」设置',
+  tccStatusMissing: '未开启',
+  tccStatusGranted: '已开启',
+  tccStatusNeedsRelaunch: '已开启，请退出后重开',
+  tccFooter: '打开开关后，请完全退出 {name} 再打开。只关主窗口无效。插件不能替你重启官方应用。',
+  tccLater: '稍后',
+  tccDismiss: '关闭',
 }
 const en = {
   title: 'Desktop agent',
@@ -60,6 +78,23 @@ const en = {
   running: 'Running',
   tooLong: 'Limit is 8000 characters. The text was kept.',
   truncated: 'truncated',
+  chipDismiss: 'Remove',
+  tccTitle: 'Desktop agent needs two Mac permissions',
+  tccAppHint: 'In the list, turn on {name}.',
+  tccScreenName: 'Screen Recording',
+  tccScreenReason: 'Lets the agent see the current window.',
+  tccScreenPath: 'System Settings → Privacy & Security → Screen Recording',
+  tccScreenOpen: 'Open Screen Recording settings',
+  tccAccessibilityName: 'Accessibility',
+  tccAccessibilityReason: 'Lets the agent click and type.',
+  tccAccessibilityPath: 'System Settings → Privacy & Security → Accessibility',
+  tccAccessibilityOpen: 'Open Accessibility settings',
+  tccStatusMissing: 'Off',
+  tccStatusGranted: 'On',
+  tccStatusNeedsRelaunch: 'On — quit and reopen',
+  tccFooter: 'After the switches are on, quit {name} completely and open it again. Closing the main window does not quit. This plugin cannot restart the official app.',
+  tccLater: 'Later',
+  tccDismiss: 'Dismiss',
 }
 
 const PROMPT_LIMIT = 8000
@@ -78,10 +113,18 @@ function promptText(prompt) {
   return (prompt.innerText ?? prompt.textContent ?? '').replaceAll('\u00a0', ' ')
 }
 
-function clipSelection(text) {
-  if (text.length <= PROMPT_LIMIT) return text
+function composeSend(instruction, selection) {
+  if (selection === '') return instruction
+  const joiner = '\n\n'
+  const room = PROMPT_LIMIT - instruction.length - joiner.length
+  if (room <= 0) return instruction
   const mark = `\n${messages.truncated}`
-  return `${text.slice(0, Math.max(0, PROMPT_LIMIT - mark.length))}${mark}`
+  let body = selection
+  if (body.length > room) {
+    const kept = Math.max(0, room - mark.length)
+    body = kept === 0 ? mark.slice(0, room) : `${selection.slice(0, kept)}${mark}`
+  }
+  return `${instruction}${joiner}${body}`
 }
 
 function insertPlainText(prompt, text) {
@@ -98,19 +141,6 @@ function editableTarget(node) {
 
 function isComposing(event) {
   return event.isComposing === true || event.keyCode === 229
-}
-
-function escapeHtml(text) {
-  return text.replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[ch])
-}
-
-function renderMarkdown(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\n/g, '<br>')
 }
 
 const THINK_MARKUP = '<path d="M10.7554 5.24466C13.9891 8.4783 15.3769 12.3333 13.8552 13.8551C12.3335 15.3768 8.4785 13.989 5.24478 10.7553C2.01111 7.52165 0.623307 3.66664 2.14504 2.14491C3.66676 0.623189 7.52178 2.01099 10.7554 5.24466Z" stroke="currentColor"></path><path d="M10.7554 10.7553C7.52178 13.989 3.66676 15.3768 2.14504 13.8551C0.623307 12.3333 2.01111 8.4783 5.24478 5.24466C8.4785 2.01099 12.3335 0.623189 13.8552 2.14491C15.3769 3.66664 13.9891 7.52165 10.7554 10.7553Z" stroke="currentColor"></path><path d="M8.9587 8.00025C8.9587 8.52835 8.5306 8.95655 8.0024 8.95655C7.47429 8.95655 7.04614 8.52835 7.04614 8.00025C7.04614 7.47209 7.47429 7.04395 8.0024 7.04395C8.5306 7.04395 8.9587 7.47209 8.9587 8.00025Z" fill="currentColor"></path>'
@@ -212,6 +242,8 @@ function main() {
   let expanded = false
   let pinned = false
   let running = false
+  let attachedSelection = ''
+  let tccGateVisible = false
   let processGroup
   let processClock
   let dragging = false
@@ -266,7 +298,7 @@ function main() {
   function syncGif() {
     if (pageClosed()) return
     const gif = document.querySelector('#ball-gif')
-    const play = expanded || running || asking()
+    const play = expanded || running || asking() || tccGateVisible || attachedSelection !== ''
     if (play) {
       if (gif.dataset.mode !== 'play') {
         gif.dataset.mode = 'play'
@@ -1006,19 +1038,129 @@ function main() {
   dockTab.addEventListener('pointercancel', (event) => { void finishPointer(event) })
   dockTab.addEventListener('lostpointercapture', (event) => { void finishPointer(event) })
 
+  const selectionChip = document.querySelector('#selection-chip')
+  const selectionChipText = document.querySelector('#selection-chip-text')
+  const selectionChipDismiss = document.querySelector('#selection-chip-dismiss')
+  selectionChipDismiss.textContent = '\u00d7'
+  selectionChipDismiss.setAttribute('aria-label', messages.chipDismiss)
+  selectionChipDismiss.title = messages.chipDismiss
+  const tccGate = document.querySelector('#tcc-gate')
+  const tccDismiss = document.querySelector('#tcc-dismiss')
+  const tccTitle = document.querySelector('#tcc-title')
+  const tccApp = document.querySelector('#tcc-app')
+  const tccScreenStatus = document.querySelector('#tcc-screen-status')
+  const tccScreenOpen = document.querySelector('#tcc-screen-open')
+  const tccAccessibilityStatus = document.querySelector('#tcc-accessibility-status')
+  const tccAccessibilityOpen = document.querySelector('#tcc-accessibility-open')
+  const tccFooter = document.querySelector('#tcc-footer')
+  const tccLater = document.querySelector('#tcc-later')
+  document.querySelector('#tcc-screen-name').textContent = messages.tccScreenName
+  document.querySelector('#tcc-screen-reason').textContent = messages.tccScreenReason
+  document.querySelector('#tcc-screen-path').textContent = messages.tccScreenPath
+  tccScreenOpen.textContent = messages.tccScreenOpen
+  document.querySelector('#tcc-accessibility-name').textContent = messages.tccAccessibilityName
+  document.querySelector('#tcc-accessibility-reason').textContent = messages.tccAccessibilityReason
+  document.querySelector('#tcc-accessibility-path').textContent = messages.tccAccessibilityPath
+  tccAccessibilityOpen.textContent = messages.tccAccessibilityOpen
+  tccTitle.textContent = messages.tccTitle
+  tccLater.textContent = messages.tccLater
+  tccDismiss.textContent = '\u00d7'
+  tccDismiss.setAttribute('aria-label', messages.tccDismiss)
+  tccDismiss.title = messages.tccDismiss
+  document.querySelector('#tcc-relaunch').hidden = true
+
+  function setAttachedSelection(text) {
+    attachedSelection = text
+    const show = text !== ''
+    selectionChip.hidden = !show
+    document.body.classList.toggle('has-selection-chip', show)
+    selectionChipText.textContent = text
+    syncGif()
+  }
+
+  function tccReady(tccStatus) {
+    return tccStatus == null || tccStatus.applicable === false
+      || (tccStatus.screen === 'granted' && tccStatus.accessibility === 'granted')
+  }
+
+  function tccStatusLabel(state) {
+    if (state === 'granted') return messages.tccStatusGranted
+    if (state === 'needsRelaunch') return messages.tccStatusNeedsRelaunch
+    return messages.tccStatusMissing
+  }
+
+  function hideTccGate() {
+    tccGateVisible = false
+    tccGate.hidden = true
+    document.body.classList.remove('tcc-gating')
+    syncGif()
+  }
+
+  function showTccGate(tccStatus) {
+    tccGateVisible = true
+    const name = typeof tccStatus.appName === 'string' ? tccStatus.appName : ''
+    tccApp.textContent = messages.tccAppHint.replaceAll('{name}', name)
+    tccFooter.textContent = messages.tccFooter.replaceAll('{name}', name)
+    tccScreenStatus.textContent = tccStatusLabel(tccStatus.screen)
+    tccAccessibilityStatus.textContent = tccStatusLabel(tccStatus.accessibility)
+    tccScreenOpen.hidden = tccStatus.screen === 'granted'
+    tccAccessibilityOpen.hidden = tccStatus.accessibility === 'granted'
+    tccGate.hidden = false
+    document.body.classList.add('tcc-gating')
+    syncGif()
+  }
+
+  async function refreshTccGate(options = {}) {
+    if (typeof api.tccStatus !== 'function') return true
+    let tccStatus
+    try {
+      tccStatus = await api.tccStatus()
+    } catch {
+      return true
+    }
+    if (tccReady(tccStatus)) {
+      hideTccGate()
+      return true
+    }
+    if (options.forceShow || tccGateVisible) showTccGate(tccStatus)
+    return false
+  }
+
+  async function openTccRight(right) {
+    if (typeof api.openTcc !== 'function') return
+    let tccStatus
+    try {
+      tccStatus = await api.openTcc(right)
+    } catch {
+      return
+    }
+    if (tccReady(tccStatus)) hideTccGate()
+    else showTccGate(tccStatus)
+  }
+
   composer.addEventListener('submit', (event) => {
     event.preventDefault()
+    void submitComposer()
+  })
+  async function submitComposer() {
     const text = promptText(prompt).trim()
     if (text === '') return
     if (text.length > PROMPT_LIMIT) {
       status.textContent = messages.tooLong
       return
     }
+    const ready = await refreshTccGate({ forceShow: true })
+    if (!ready) {
+      await setExpanded(true)
+      return
+    }
+    const payload = composeSend(text, attachedSelection)
     clearPrompt()
+    setAttachedSelection('')
     setHistoryOpen(false)
     setPermissionOpen(false)
-    api.send(text)
-  })
+    api.send(payload)
+  }
   prompt.addEventListener('input', syncComposerHeight)
   prompt.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.shiftKey || isComposing(event)) return
@@ -1116,12 +1258,16 @@ function main() {
   api.onReset(() => { clearTranscript() })
   api.onAttach((text) => {
     if (typeof text !== 'string' || text === '') return
-    const body = clipSelection(text)
     void setExpanded(true).then(() => {
-      insertPlainText(prompt, body)
+      setAttachedSelection(text)
       prompt.focus()
     })
   })
+  selectionChipDismiss.addEventListener('click', () => { setAttachedSelection('') })
+  tccDismiss.addEventListener('click', () => { hideTccGate() })
+  tccLater.addEventListener('click', () => { hideTccGate() })
+  tccScreenOpen.addEventListener('click', () => { void openTccRight('screen') })
+  tccAccessibilityOpen.addEventListener('click', () => { void openTccRight('accessibility') })
   api.onAvatar((src) => {
     avatarSrc = typeof src === 'string' && src !== '' ? src : 'deepseek-avatar-square.gif'
     const gif = document.querySelector('#ball-gif')

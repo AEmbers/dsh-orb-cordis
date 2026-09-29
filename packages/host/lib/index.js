@@ -145,6 +145,7 @@ function isAgentModelSelection(value) {
 var ProfileStore = class {
 	dir;
 	permissionValue;
+	permissionFallbackValue;
 	modelValue;
 	millifractionValue;
 	selectionValue;
@@ -152,7 +153,9 @@ var ProfileStore = class {
 	ballValue;
 	constructor(dir) {
 		this.dir = dir;
-		this.permissionValue = readPermission(dir);
+		const permission = readPermission(dir);
+		this.permissionValue = permission.preset;
+		this.permissionFallbackValue = permission.fallback;
 		this.modelValue = readModels(dir);
 		this.millifractionValue = readMillifraction(dir);
 		const selection = readSelection(dir);
@@ -163,8 +166,13 @@ var ProfileStore = class {
 	permission() {
 		return this.permissionValue;
 	}
+	/** True when the permission file exists but cannot be used. Missing means full access. */
+	permissionFallback() {
+		return this.permissionFallbackValue;
+	}
 	setPermission(preset) {
 		this.permissionValue = preset;
+		this.permissionFallbackValue = false;
 		writeJson(join(this.dir, PERMISSION_FILE), { preset });
 	}
 	models() {
@@ -273,8 +281,37 @@ function defaultMillifraction(platform = process.platform) {
 	return platform === "win32";
 }
 function readPermission(dir) {
-	const preset = record(readJson$1(join(dir, PERMISSION_FILE)))?.preset;
-	return isPermissionPreset(preset) ? preset : "danger-full-access";
+	let raw;
+	try {
+		raw = readFileSync(join(dir, PERMISSION_FILE), "utf8");
+	} catch (error) {
+		if (isEnoent(error)) return {
+			preset: "danger-full-access",
+			fallback: false
+		};
+		return {
+			preset: "workspace-write",
+			fallback: true
+		};
+	}
+	let parsed;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return {
+			preset: "workspace-write",
+			fallback: true
+		};
+	}
+	const preset = record(parsed)?.preset;
+	if (isPermissionPreset(preset)) return {
+		preset,
+		fallback: false
+	};
+	return {
+		preset: "workspace-write",
+		fallback: true
+	};
 }
 function readModels(dir) {
 	const value = record(readJson$1(join(dir, MODELS_FILE)));
@@ -548,7 +585,8 @@ async function snapshot(deps) {
 		millifractionEnabled: deps.store.millifractionEnabled(),
 		tcc: deps.tcc.status(),
 		helperError: deps.control.helperStatus?.() ?? "",
-		selectionAvailable: selectionRuntimeAvailable()
+		selectionAvailable: selectionRuntimeAvailable(),
+		permissionFallback: deps.store.permissionFallback()
 	};
 }
 async function catalog(deps) {
@@ -703,6 +741,15 @@ function isOrbWorkspace(cwd, orbCwd) {
 /** Matches the official app's Electron framework and the fork's desktop package. */
 const ELECTRON_VERSION = "44.0.0";
 const RELEASE_BASE = `https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}`;
+/** Official SHASUMS256.txt for Electron 44.0.0. The download is rejected when it disagrees. */
+const PINNED_SHA256 = {
+	"electron-v44.0.0-darwin-arm64.zip": "076d79742986e1b100b69ebecc691cb07368045e54c9087cef631b8622b76a80",
+	"electron-v44.0.0-darwin-x64.zip": "28429e700ad68d9624aaa90b6543ffe891a48c14121fd904cd294e5edcee63ff",
+	"electron-v44.0.0-linux-arm64.zip": "74b6f18bc29c0d52cf8e963c45d476800419097c6f3d53b27c5df335207e52bb",
+	"electron-v44.0.0-linux-x64.zip": "d65286d812719f2b4c1a1b806a80f288a1058c89c7b058dae1e03ab25e499446",
+	"electron-v44.0.0-win32-arm64.zip": "984c8f3b9ffaf3c0a3f3501c96277effc05a9f0df5a5d920b2610c09ebaf4368",
+	"electron-v44.0.0-win32-x64.zip": "e61aa3bcea8152bc0730abd015e47c032d778a0ef10e2a1c78ba3c4ea47942f9"
+};
 /**
 * Resolve the helper executable.
 * `DSH_ORB_ELECTRON_PATH` wins. Otherwise use the cached official zip, downloading it once.
@@ -835,7 +882,14 @@ function binaryRelative() {
 	if (process.platform === "win32") return "electron.exe";
 	return "electron";
 }
+/** The hash written in source. `sums` must list the same value or the download stops. */
 function expectedHash(sums, fileName) {
+	const pinned = PINNED_SHA256[fileName];
+	if (pinned === void 0) throw new Error(`dsh-orb: ${fileName} has no pinned Electron ${ELECTRON_VERSION} checksum`);
+	if (hashFromSums(sums, fileName) !== pinned) throw new Error(`dsh-orb: Electron ${ELECTRON_VERSION} checksum list does not match the pinned hash for ${fileName}`);
+	return pinned;
+}
+function hashFromSums(sums, fileName) {
 	for (const line of sums.split("\n")) {
 		const match = /^([a-fA-F0-9]{64})\s+\*?(\S+)\s*$/.exec(line.trim());
 		if (match?.[2] === fileName) return match[1].toLowerCase();
@@ -1355,6 +1409,7 @@ var OrbRuntime = class {
 	giveUp;
 	helperPid;
 	overlayWaiters = /* @__PURE__ */ new Map();
+	tcc;
 	selection;
 	overlay = createOverlayGuard({
 		hasHelper: () => this.sockets.size > 0,
@@ -1366,6 +1421,7 @@ var OrbRuntime = class {
 	constructor(ctx, store, options = {}) {
 		this.ctx = ctx;
 		this.store = store;
+		this.tcc = options.tcc ?? new TccMonitor();
 		const access = productionAccessibility();
 		this.selection = new SelectionController({
 			enabled: () => this.store.selectionEnabled(),
@@ -1491,7 +1547,7 @@ var OrbRuntime = class {
 		if (this.retry) clearTimeout(this.retry);
 		this.retry = void 0;
 		this.stopWatch();
-		this.failQuestion("ask_user_question was aborted before the user answered", "ASK_ABORTED");
+		this.handQuestionBack();
 		this.server?.close();
 		this.server = void 0;
 		for (const socket of this.sockets) socket.destroy();
@@ -1569,7 +1625,7 @@ var OrbRuntime = class {
 			this.sockets.delete(socket);
 			this.buffers.delete(socket);
 			if (this.sockets.size === 0) {
-				this.failQuestion("the floating ball closed before the user answered", "ASK_ABORTED");
+				this.handQuestionBack();
 				this.helperPid = void 0;
 				this.selection.stop();
 			}
@@ -1822,7 +1878,7 @@ var OrbRuntime = class {
 			const name = typeof chunk.name === "string" ? chunk.name : "";
 			if (!name) return;
 			const id = typeof chunk.id === "string" ? chunk.id : "";
-			this.block(id ? `tool:${id}` : key, "tool", name, true, "set");
+			this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, "tool", name, true, "set");
 			return;
 		}
 		if (chunk.type === "block-end") this.applyContent(key, chunk.block, turn, step, index, false);
@@ -1863,9 +1919,11 @@ var OrbRuntime = class {
 		}
 		if (record.type !== "tool-call-chunks") return;
 		const name = typeof record.name === "string" ? record.name : "";
-		if (!name || this.hasTool(name)) return;
+		if (!name) return;
 		const id = typeof record.id === "string" ? record.id : "";
-		this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, "tool", name, false, "set");
+		const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
+		if (!id && this.blocks.has(key)) return;
+		this.block(key, "tool", name, false, "set");
 	}
 	applyContent(key, part, turn, step, index, running) {
 		const block = asRecord(part);
@@ -1878,13 +1936,11 @@ var OrbRuntime = class {
 		}
 		if (block.type !== "tool-call" && block.type !== "tool_use") return;
 		const name = typeof block.name === "string" ? block.name : "";
-		if (!name || this.hasTool(name)) return;
+		if (!name) return;
 		const id = typeof block.id === "string" ? block.id : typeof block.callId === "string" ? block.callId : "";
-		this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, "tool", name, running, "set");
-	}
-	hasTool(name) {
-		for (const block of this.blocks.values()) if (block.kind === "tool" && block.text === name) return true;
-		return false;
+		const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`;
+		if (!id && this.blocks.has(toolKey)) return;
+		this.block(toolKey, "tool", name, running, "set");
 	}
 	runningTool(name) {
 		for (const key of this.blockOrder) {
@@ -1948,7 +2004,8 @@ var OrbRuntime = class {
 			this.pending = {
 				id,
 				resolve,
-				reject
+				reject,
+				next
 			};
 			this.questionBody = questions;
 			this.broadcast(this.questionPayload(id));
@@ -1986,6 +2043,19 @@ var OrbRuntime = class {
 	}
 	onQuestionCancel(id) {
 		this.failQuestion("the user cancelled ask_user_question", "ASK_CANCELLED", id);
+	}
+	/** The ball is gone, so the main window can answer. Abort and cancel still reject. */
+	handQuestionBack() {
+		const pending = this.pending;
+		if (!pending) return;
+		this.pending = void 0;
+		this.questionBody = void 0;
+		this.broadcast({
+			type: "question-clear",
+			id: pending.id
+		});
+		console.error("dsh-orb: question returned to the main window");
+		pending.next().then(pending.resolve, pending.reject);
 	}
 	failQuestion(message, code, id = this.pending?.id) {
 		const pending = this.pending;
@@ -2202,7 +2272,27 @@ var OrbRuntime = class {
 			this.run("disable", () => this.setBallEnabled(false));
 			return;
 		}
-		if (record.type === "open-main") this.run("open-main", () => this.openMain());
+		if (record.type === "open-main") {
+			this.run("open-main", () => this.openMain());
+			return;
+		}
+		if (record.type === "tcc") {
+			this.broadcast({
+				type: "tcc",
+				status: this.tcc.status()
+			});
+			return;
+		}
+		if (record.type === "tcc-open" && isTccRight(record.right)) {
+			const right = record.right;
+			this.run("tcc", async () => {
+				await this.tcc.open(right);
+				this.broadcast({
+					type: "tcc",
+					status: this.tcc.status()
+				});
+			});
+		}
 	}
 	/** Keep a failed ball action inside this plugin. An unhandled rejection exits the official host. */
 	run(label, task) {
@@ -2534,7 +2624,7 @@ function apply(ctx, config = {}) {
 	logWebPort(ctx);
 	const store = new ProfileStore(profileDirectory(ctx));
 	const tcc = new TccMonitor();
-	const runtime = new OrbRuntime(ctx, store);
+	const runtime = new OrbRuntime(ctx, store, { tcc });
 	installOrbServices(ctx, store);
 	console.error(`dsh-orb: profile ${store.dir}`);
 	ctx.effect(() => {

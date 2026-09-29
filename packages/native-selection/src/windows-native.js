@@ -2,21 +2,9 @@
 
 import { execFile } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { Worker } from 'node:worker_threads'
 
 const require = createRequire(import.meta.url)
-
-const WH_KEYBOARD_LL = 13
-const WH_MOUSE_LL = 14
-const WM_KEYDOWN = 0x0100
-const WM_SYSKEYDOWN = 0x0104
-const WM_LBUTTONDOWN = 0x0201
-const WM_LBUTTONUP = 0x0202
-const WM_RBUTTONDOWN = 0x0204
-const WM_RBUTTONUP = 0x0205
-const WM_MBUTTONDOWN = 0x0207
-const WM_MBUTTONUP = 0x0208
-const WM_MOUSEWHEEL = 0x020A
-const MONITOR_DEFAULTTONEAREST = 2
 
 const SELECTION_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -127,66 +115,38 @@ export function activateWindowsPid(pid) {
   }
 }
 
-function dip(user32, shcore, x, y) {
-  const monitorFromPoint = user32.func('void * __stdcall MonitorFromPoint(DSH_ORB_SEL_POINT pt, uint32 dwFlags)')
-  const monitor = monitorFromPoint({ x, y }, MONITOR_DEFAULTTONEAREST)
-  const dpiX = [0]
-  const dpiY = [0]
-  const dpiForMonitor = shcore.func(
-    'int __stdcall GetDpiForMonitor(void *hmonitor, int dpiType, _Out_ uint32 *dpiX, _Out_ uint32 *dpiY)',
-  )
-  if (dpiForMonitor(monitor, 0, dpiX, dpiY) !== 0) return { x, y }
-  const scale = (dpiX[0] ?? 96) / 96
-  if (!Number.isFinite(scale) || scale <= 0) return { x, y }
-  return { x: x / scale, y: y / scale }
+const WM_QUIT = 0x0012
+
+/** Hooks run on a worker that owns a Win32 message loop. The host thread does not. */
+export function installWindowsSelectionHooks(dispatch) {
+  const worker = new Worker(new URL('./windows-hook-worker.js', import.meta.url), { type: 'module' })
+  let threadId = 0
+  worker.on('message', (event) => {
+    if (event !== null && typeof event === 'object' && event.type === 'ready' && typeof event.threadId === 'number') {
+      threadId = event.threadId
+      return
+    }
+    dispatch(event)
+  })
+  worker.on('error', (error) => {
+    console.error(`dsh-orb selection: windows hook worker failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  return () => {
+    if (threadId > 0) postQuit(threadId)
+    const timer = setTimeout(() => { void worker.terminate() }, 500)
+    timer.unref?.()
+    worker.once('exit', () => clearTimeout(timer))
+  }
 }
 
-export function installWindowsSelectionHooks(dispatch) {
-  const lib = prepareKoffi()
-  const user32 = lib.load('user32.dll')
-  const shcore = lib.load('shcore.dll')
-  const CallNextHookEx = user32.func('intptr __stdcall CallNextHookEx(void *hhk, int nCode, uintptr wParam, intptr lParam)')
-  const SetWindowsHookExW = user32.func('void * __stdcall SetWindowsHookExW(int idHook, DshOrbSelHookProc *lpfn, void *hMod, uint32 dwThreadId)')
-  const UnhookWindowsHookEx = user32.func('int __stdcall UnhookWindowsHookEx(void *hhk)')
-  const hooks = []
-  const callbacks = []
-  const mouse = lib.register((code, wParam, lParam) => {
-    try {
-      if (code >= 0) {
-        const info = lib.decode(lParam, 'DSH_ORB_SEL_MSLL')
-        const pointDip = dip(user32, shcore, info.pt.x, info.pt.y)
-        const kind = Number(wParam)
-        if (kind === WM_MOUSEWHEEL) dispatch({ type: 'wheel' })
-        else if (kind === WM_LBUTTONDOWN) dispatch({ type: 'mouse-down', ...pointDip, button: 'left' })
-        else if (kind === WM_LBUTTONUP) dispatch({ type: 'mouse-up', ...pointDip, button: 'left' })
-        else if (kind === WM_RBUTTONDOWN || kind === WM_RBUTTONUP) dispatch({ type: 'mouse-down', ...pointDip, button: 'right' })
-        else if (kind === WM_MBUTTONDOWN || kind === WM_MBUTTONUP) dispatch({ type: 'mouse-down', ...pointDip, button: 'middle' })
-      }
-    } catch {
-      // A hook fault must not swallow the rest of the mouse chain.
-    }
-    return CallNextHookEx(null, code, wParam, lParam)
-  }, lib.pointer('DshOrbSelHookProc'))
-  callbacks.push(mouse)
-  hooks.push(SetWindowsHookExW(WH_MOUSE_LL, mouse, null, 0))
-  const keyboard = lib.register((code, wParam, lParam) => {
-    try {
-      if (code >= 0) {
-        const kind = Number(wParam)
-        if (kind === WM_KEYDOWN || kind === WM_SYSKEYDOWN) dispatch({ type: 'key' })
-      }
-    } catch {
-      // A hook fault must not swallow the rest of the keyboard chain.
-    }
-    return CallNextHookEx(null, code, wParam, lParam)
-  }, lib.pointer('DshOrbSelHookProc'))
-  callbacks.push(keyboard)
-  hooks.push(SetWindowsHookExW(WH_KEYBOARD_LL, keyboard, null, 0))
-  return () => {
-    for (const hook of hooks) {
-      if (hook !== null && hook !== undefined) UnhookWindowsHookEx(hook)
-    }
-    for (const callback of callbacks) lib.unregister(callback)
+function postQuit(threadId) {
+  try {
+    const lib = prepareKoffi()
+    const user32 = lib.load('user32.dll')
+    const post = user32.func('int __stdcall PostThreadMessageW(uint32 idThread, uint32 msg, uintptr wParam, intptr lParam)')
+    post(threadId, WM_QUIT, 0, 0)
+  } catch (error) {
+    console.error(`dsh-orb selection: could not stop the windows hook worker: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 

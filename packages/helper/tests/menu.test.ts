@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { createRequire, Module } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
@@ -7,6 +7,67 @@ import { contextMenuTemplate } from '../src/menu.ts'
 import { modelMenuItems } from '../src/model-menu.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
+
+interface PreloadApi {
+  send?: (text: string) => void
+  setPermission?: (preset: string) => void
+  requestHistory?: () => void
+  openSession?: (id: string) => void
+  newSession?: () => void
+  stop?: () => void
+  answerQuestion?: (id: string, answers: unknown) => void
+  tccStatus?: () => Promise<unknown>
+  openTcc?: (right: string) => Promise<unknown>
+  selection?: {
+    search?: () => void
+    setLanguage?: (language: string) => void
+    setContentSize?: (size: { width: number; height: number }) => Promise<unknown>
+  }
+}
+
+function loadPreload(file: string): { api: PreloadApi; sent: [string, unknown][]; invoked: [string, unknown][] } {
+  const sent: [string, unknown][] = []
+  const invoked: [string, unknown][] = []
+  const exposed: Record<string, PreloadApi> = {}
+  const electron = {
+    contextBridge: {
+      exposeInMainWorld(name: string, value: PreloadApi) { exposed[name] = value },
+    },
+    ipcRenderer: {
+      send(channel: string, payload?: unknown) { sent.push([channel, payload]) },
+      invoke(channel: string, payload?: unknown) {
+        invoked.push([channel, payload])
+        return Promise.resolve({ menuAbove: false })
+      },
+      on(channel: string) { sent.push([`listen:${channel}`, undefined]) },
+    },
+  }
+  const loader = Module as unknown as {
+    _resolveFilename: (request: string, parent: unknown, isMain: boolean, options: unknown) => string
+    _cache: Record<string, { id: string; filename: string; loaded: boolean; exports: unknown }>
+  }
+  const original = loader._resolveFilename
+  loader._resolveFilename = function (request, parent, isMain, options) {
+    if (request === 'electron') return 'electron-mock-dsh-orb'
+    return original.call(this, request, parent, isMain, options)
+  }
+  loader._cache['electron-mock-dsh-orb'] = {
+    id: 'electron-mock-dsh-orb',
+    filename: 'electron-mock-dsh-orb',
+    loaded: true,
+    exports: electron,
+  }
+  const filename = join(here, file)
+  delete loader._cache[filename]
+  try {
+    createRequire(import.meta.url)(filename)
+  } finally {
+    loader._resolveFilename = original
+    delete loader._cache['electron-mock-dsh-orb']
+    delete loader._cache[filename]
+  }
+  return { api: exposed.dshOrb ?? {}, sent, invoked }
+}
 
 const catalog = {
   groups: [{
@@ -105,22 +166,43 @@ describe('ball menu', () => {
     assert.equal(english.at(-1)?.label, 'Disable floating ball')
   })
 
-  it('wires the page to the same control messages the host accepts', () => {
-    const shell = readFileSync(join(here, '../assets/shell.js'), 'utf8')
-    const preload = readFileSync(join(here, '../preload.cjs'), 'utf8')
-    const main = readFileSync(join(here, '../src/main.ts'), 'utf8')
-    for (const name of ['requestHistory', 'openSession', 'newSession', 'setPermission', 'stop', 'onHistory', 'onPermission', 'onReset', 'onAvatar']) {
-      assert.match(shell, new RegExp(`api\\.${name}\\(`))
-      assert.match(preload, new RegExp(`${name}\\(`))
-    }
-    assert.match(shell, /read-only/)
-    assert.match(shell, /workspace-write/)
-    assert.match(shell, /danger-full-access/)
-    assert.match(main, /context-menu/)
-    assert.match(main, /isEditable/)
-    assert.match(main, /setTimeout/)
-    assert.match(preload, /orb:history/)
-    assert.match(preload, /orb:stop/)
-    assert.match(preload, /x-dsh-orb-helper|orb:avatar/)
+  it('sends ball controls from the ball preload and keeps them off the toolbar', () => {
+    const ball = loadPreload('../preload.cjs')
+    ball.api.send?.('hello')
+    ball.api.setPermission?.('read-only')
+    ball.api.requestHistory?.()
+    ball.api.openSession?.('session-1')
+    ball.api.newSession?.()
+    ball.api.stop?.()
+    ball.api.answerQuestion?.('q', [{ id: 'q', selected: ['a'] }])
+    void ball.api.tccStatus?.()
+    void ball.api.openTcc?.('screen')
+    assert.deepEqual(ball.sent.filter(([channel]) => !channel.startsWith('listen:')), [
+      ['orb:prompt', 'hello'],
+      ['orb:permission', 'read-only'],
+      ['orb:history', undefined],
+      ['orb:open', 'session-1'],
+      ['orb:new', undefined],
+      ['orb:stop', undefined],
+      ['orb:question-answer', { id: 'q', answers: [{ id: 'q', selected: ['a'] }] }],
+    ])
+    assert.deepEqual(ball.invoked, [
+      ['orb:tcc-status', undefined],
+      ['orb:tcc-open', 'screen'],
+    ])
+    assert.equal(ball.api.selection, undefined)
+
+    const toolbar = loadPreload('../selection-preload.cjs')
+    toolbar.api.selection?.search?.()
+    toolbar.api.selection?.setLanguage?.('en')
+    void toolbar.api.selection?.setContentSize?.({ width: 10, height: 20 })
+    assert.deepEqual(toolbar.sent.filter(([channel]) => !channel.startsWith('listen:')), [
+      ['orb:selection-action', { action: 'search' }],
+      ['orb:selection-action', { action: 'language', language: 'en' }],
+    ])
+    assert.deepEqual(toolbar.invoked, [['orb:selection-size', { width: 10, height: 20 }]])
+    assert.equal(toolbar.api.send, undefined)
+    assert.equal(toolbar.api.setPermission, undefined)
+    assert.equal(toolbar.api.tccStatus, undefined)
   })
 })

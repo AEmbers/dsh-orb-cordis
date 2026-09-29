@@ -13,7 +13,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { normalizeCatalog } from './catalog.ts'
 import { resolveElectronBinary } from './electron-runtime.ts'
 import { openMainWindow } from './open-main.ts'
-import { isDesktopHost } from './tcc.ts'
+import { isDesktopHost, isTccRight, TccMonitor, type TccRight, type TccStatus } from './tcc.ts'
 import {
   isAgentModelSelection,
   isPermissionPreset,
@@ -134,6 +134,7 @@ interface PendingQuestion {
   readonly id: string
   readonly resolve: (answer: QuestionAnswer) => void
   readonly reject: (error: Error) => void
+  readonly next: () => Promise<QuestionAnswer>
 }
 
 interface ShownQuestion {
@@ -180,6 +181,7 @@ export class OrbRuntime {
   private giveUp: ReturnType<typeof setTimeout> | undefined
   private helperPid: number | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
+  private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
   private readonly selection: SelectionController
   private readonly overlay = createOverlayGuard({
     hasHelper: () => this.sockets.size > 0,
@@ -190,8 +192,9 @@ export class OrbRuntime {
   constructor(
     private readonly ctx: OrbContext,
     private readonly store: ProfileStore,
-    options: { startMonitor?: SelectionStarter } = {},
+    options: { startMonitor?: SelectionStarter; tcc?: { status(): TccStatus; open(right: TccRight): Promise<void> } } = {},
   ) {
+    this.tcc = options.tcc ?? new TccMonitor()
     const access = productionAccessibility()
     this.selection = new SelectionController({
       enabled: () => this.store.selectionEnabled(),
@@ -294,7 +297,7 @@ export class OrbRuntime {
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
     this.stopWatch()
-    this.failQuestion('ask_user_question was aborted before the user answered', 'ASK_ABORTED')
+    this.handQuestionBack()
     this.server?.close()
     this.server = undefined
     for (const socket of this.sockets) socket.destroy()
@@ -379,7 +382,7 @@ export class OrbRuntime {
       this.sockets.delete(socket)
       this.buffers.delete(socket)
       if (this.sockets.size === 0) {
-        this.failQuestion('the floating ball closed before the user answered', 'ASK_ABORTED')
+        this.handQuestionBack()
         this.helperPid = undefined
         this.selection.stop()
       }
@@ -633,7 +636,7 @@ export class OrbRuntime {
       const name = typeof chunk.name === 'string' ? chunk.name : ''
       if (!name) return
       const id = typeof chunk.id === 'string' ? chunk.id : ''
-      this.block(id ? `tool:${id}` : key, 'tool', name, true, 'set')
+      this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, true, 'set')
       return
     }
     if (chunk.type === 'block-end') this.applyContent(key, chunk.block, turn, step, index, false)
@@ -675,9 +678,11 @@ export class OrbRuntime {
     }
     if (record.type !== 'tool-call-chunks') return
     const name = typeof record.name === 'string' ? record.name : ''
-    if (!name || this.hasTool(name)) return
+    if (!name) return
     const id = typeof record.id === 'string' ? record.id : ''
-    this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, false, 'set')
+    const key = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
+    if (!id && this.blocks.has(key)) return
+    this.block(key, 'tool', name, false, 'set')
   }
 
   private applyContent(key: string, part: unknown, turn: number, step: number, index: number, running: boolean): void {
@@ -691,16 +696,11 @@ export class OrbRuntime {
     }
     if (block.type !== 'tool-call' && block.type !== 'tool_use') return
     const name = typeof block.name === 'string' ? block.name : ''
-    if (!name || this.hasTool(name)) return
+    if (!name) return
     const id = typeof block.id === 'string' ? block.id : typeof block.callId === 'string' ? block.callId : ''
-    this.block(id ? `tool:${id}` : `b:${turn}:${step}:${index}`, 'tool', name, running, 'set')
-  }
-
-  private hasTool(name: string): boolean {
-    for (const block of this.blocks.values()) {
-      if (block.kind === 'tool' && block.text === name) return true
-    }
-    return false
+    const toolKey = id ? `tool:${id}` : `b:${turn}:${step}:${index}`
+    if (!id && this.blocks.has(toolKey)) return
+    this.block(toolKey, 'tool', name, running, 'set')
   }
 
   private runningTool(name: string): string | undefined {
@@ -763,7 +763,7 @@ export class OrbRuntime {
     console.error(`dsh-orb: question card ${questions.length}`)
     const id = randomUUID()
     return new Promise((resolve, reject) => {
-      this.pending = { id, resolve, reject }
+      this.pending = { id, resolve, reject, next }
       this.questionBody = questions
       this.broadcast(this.questionPayload(id))
       const signal = request.signal
@@ -795,6 +795,17 @@ export class OrbRuntime {
 
   private onQuestionCancel(id: string): void {
     this.failQuestion('the user cancelled ask_user_question', 'ASK_CANCELLED', id)
+  }
+
+  /** The ball is gone, so the main window can answer. Abort and cancel still reject. */
+  private handQuestionBack(): void {
+    const pending = this.pending
+    if (!pending) return
+    this.pending = undefined
+    this.questionBody = undefined
+    this.broadcast({ type: 'question-clear', id: pending.id })
+    console.error('dsh-orb: question returned to the main window')
+    void pending.next().then(pending.resolve, pending.reject)
   }
 
   private failQuestion(message: string, code: string, id = this.pending?.id): void {
@@ -1012,7 +1023,21 @@ export class OrbRuntime {
       this.run('disable', () => this.setBallEnabled(false))
       return
     }
-    if (record.type === 'open-main') this.run('open-main', () => this.openMain())
+    if (record.type === 'open-main') {
+      this.run('open-main', () => this.openMain())
+      return
+    }
+    if (record.type === 'tcc') {
+      this.broadcast({ type: 'tcc', status: this.tcc.status() })
+      return
+    }
+    if (record.type === 'tcc-open' && isTccRight(record.right)) {
+      const right = record.right
+      this.run('tcc', async () => {
+        await this.tcc.open(right)
+        this.broadcast({ type: 'tcc', status: this.tcc.status() })
+      })
+    }
   }
 
   /** Keep a failed ball action inside this plugin. An unhandled rejection exits the official host. */

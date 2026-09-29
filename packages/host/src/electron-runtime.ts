@@ -16,6 +16,16 @@ const ELECTRON_VERSION = '44.0.0'
 
 const RELEASE_BASE = `https://github.com/electron/electron/releases/download/v${ELECTRON_VERSION}`
 
+/** Official SHASUMS256.txt for Electron 44.0.0. The download is rejected when it disagrees. */
+export const PINNED_SHA256: Readonly<Record<string, string>> = {
+  'electron-v44.0.0-darwin-arm64.zip': '076d79742986e1b100b69ebecc691cb07368045e54c9087cef631b8622b76a80',
+  'electron-v44.0.0-darwin-x64.zip': '28429e700ad68d9624aaa90b6543ffe891a48c14121fd904cd294e5edcee63ff',
+  'electron-v44.0.0-linux-arm64.zip': '74b6f18bc29c0d52cf8e963c45d476800419097c6f3d53b27c5df335207e52bb',
+  'electron-v44.0.0-linux-x64.zip': 'd65286d812719f2b4c1a1b806a80f288a1058c89c7b058dae1e03ab25e499446',
+  'electron-v44.0.0-win32-arm64.zip': '984c8f3b9ffaf3c0a3f3501c96277effc05a9f0df5a5d920b2610c09ebaf4368',
+  'electron-v44.0.0-win32-x64.zip': 'e61aa3bcea8152bc0730abd015e47c032d778a0ef10e2a1c78ba3c4ea47942f9',
+}
+
 /**
  * Resolve the helper executable.
  * `DSH_ORB_ELECTRON_PATH` wins. Otherwise use the cached official zip, downloading it once.
@@ -150,7 +160,20 @@ function binaryRelative(): string {
   return 'electron'
 }
 
-function expectedHash(sums: string, fileName: string): string {
+/** The hash written in source. `sums` must list the same value or the download stops. */
+export function expectedHash(sums: string, fileName: string): string {
+  const pinned = PINNED_SHA256[fileName]
+  if (pinned === undefined) {
+    throw new Error(`dsh-orb: ${fileName} has no pinned Electron ${ELECTRON_VERSION} checksum`)
+  }
+  const listed = hashFromSums(sums, fileName)
+  if (listed !== pinned) {
+    throw new Error(`dsh-orb: Electron ${ELECTRON_VERSION} checksum list does not match the pinned hash for ${fileName}`)
+  }
+  return pinned
+}
+
+function hashFromSums(sums: string, fileName: string): string {
   for (const line of sums.split('\n')) {
     const match = /^([a-fA-F0-9]{64})\s+\*?(\S+)\s*$/.exec(line.trim())
     if (match?.[2] === fileName) return match[1].toLowerCase()

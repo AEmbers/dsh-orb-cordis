@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { OrbRuntime, type OrbContext } from '../src/orb.ts'
 import { ProfileStore } from '../src/preferences.ts'
+import type { TccRight, TccStatus } from '../src/tcc.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'orb-runtime-'))
 process.env.DSH_HOME = home
@@ -56,7 +57,9 @@ interface Harness {
   releasePrompt: () => void
 }
 
-function boot(): Harness {
+function boot(extra: {
+  tcc?: { status(): TccStatus; open(right: TccRight): Promise<void> }
+} = {}): Harness {
   const profile = mkdtempSync(join(home, 'profile-'))
   const store = new ProfileStore(profile)
   const calls: Harness['calls'] = { create: [], prompt: [], cancel: [], selectModel: [] }
@@ -82,6 +85,7 @@ function boot(): Harness {
             { type: 'text', text: '好' },
             { type: 'reasoning', text: '   ' },
             { type: 'tool-call', name: 'click', id: 'call-1' },
+            { type: 'tool-call', name: 'click', id: 'call-2' },
           ],
         },
       },
@@ -165,6 +169,7 @@ function boot(): Harness {
   }
   const runtime = new OrbRuntime(ctx as unknown as OrbContext, store, {
     startMonitor: () => undefined,
+    ...extra.tcc === undefined ? {} : { tcc: extra.tcc },
   })
   runtime.attachQuestions()
   runtimes.push(runtime)
@@ -252,7 +257,7 @@ describe('ball control socket', { concurrency: 1 }, () => {
       client.send({ type: 'open', sessionId: 'session-keep' })
       await waitFor(() => client.messages.slice(mark).some((message) => message.type === 'block' && message.text === 'click'))
       const blocks = client.messages.slice(mark).filter((message) => message.type === 'block')
-      assert.deepEqual(blocks.map((message) => message.text), ['你好', '好', 'click'])
+      assert.deepEqual(blocks.map((message) => message.text), ['你好', '好', 'click', 'click'])
       assert.equal(blocks.some((message) => message.text === '跳过'), false)
       assert.equal(harness.calls.create.at(-1)?.sessionId, 'session-keep')
       assert.equal(harness.calls.create.at(-1)?.agentPreset, 'computer-use')
@@ -414,6 +419,72 @@ describe('ball control socket', { concurrency: 1 }, () => {
     } finally {
       harness.releasePrompt()
       client.socket.destroy()
+      harness.runtime.halt()
+    }
+  })
+
+  it('closes a helper that sends the wrong token', async () => {
+    const harness = boot()
+    const bound = await harness.runtime.bind()
+    const socket = createConnection({ host: '127.0.0.1', port: bound.port })
+    try {
+      await once(socket, 'connect')
+      const closed = once(socket, 'close')
+      socket.write(`${JSON.stringify({ type: 'hello', token: 'wrong' })}\n`)
+      await closed
+    } finally {
+      socket.destroy()
+      harness.runtime.halt()
+    }
+  })
+
+  it('returns a pending question to the main window when the ball disconnects', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      const pending = harness.question({
+        agent: { id: sessionId },
+        questions: [{ id: 'q1', question: '继续？' }],
+      }, async () => ({ answers: [{ id: 'q1', selected: ['主窗口'] }] }))
+      await waitFor(() => client.messages.some((message) => message.type === 'question'))
+      client.socket.end()
+      assert.deepEqual(await pending, { answers: [{ id: 'q1', selected: ['主窗口'] }] })
+    } finally {
+      client.socket.destroy()
+      harness.runtime.halt()
+    }
+  })
+
+  it('reports TCC status and opens a pane through the control socket', async () => {
+    const opened: TccRight[] = []
+    let screen: TccStatus['screen'] = 'missing'
+    const harness = boot({
+      tcc: {
+        status: () => ({ applicable: true, appName: 'Test', screen, accessibility: 'granted' }),
+        async open(right) {
+          opened.push(right)
+          screen = 'needsRelaunch'
+        },
+      },
+    })
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'tcc' })
+      await waitFor(() => client.messages.some((message) => message.type === 'tcc'))
+      const first = client.messages.find((message) => message.type === 'tcc') as { status: TccStatus }
+      assert.equal(first.status.appName, 'Test')
+      assert.equal(first.status.screen, 'missing')
+      client.send({ type: 'tcc-open', right: 'screen' })
+      await waitFor(() => opened.length === 1)
+      await waitFor(() => client.messages.filter((message) => message.type === 'tcc').length > 1)
+      const second = client.messages.filter((message) => message.type === 'tcc').at(-1) as { status: TccStatus }
+      assert.equal(second.status.screen, 'needsRelaunch')
+      assert.deepEqual(opened, ['screen'])
+    } finally {
+      client.socket.end()
       harness.runtime.halt()
     }
   })

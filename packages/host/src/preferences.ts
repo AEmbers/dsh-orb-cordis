@@ -63,6 +63,7 @@ export function isAgentModelSelection(value: unknown): value is AgentModelSelect
 /** In-memory view of the profile files. Writes update the cache and the disk together. */
 export class ProfileStore {
   private permissionValue: PermissionPreset
+  private permissionFallbackValue: boolean
   private modelValue: AgentModels
   private millifractionValue: boolean
   private selectionValue: boolean
@@ -70,7 +71,9 @@ export class ProfileStore {
   private ballValue: boolean
 
   constructor(readonly dir: string) {
-    this.permissionValue = readPermission(dir)
+    const permission = readPermission(dir)
+    this.permissionValue = permission.preset
+    this.permissionFallbackValue = permission.fallback
     this.modelValue = readModels(dir)
     this.millifractionValue = readMillifraction(dir)
     const selection = readSelection(dir)
@@ -83,8 +86,14 @@ export class ProfileStore {
     return this.permissionValue
   }
 
+  /** True when the permission file exists but cannot be used. Missing means full access. */
+  permissionFallback(): boolean {
+    return this.permissionFallbackValue
+  }
+
   setPermission(preset: PermissionPreset): void {
     this.permissionValue = preset
+    this.permissionFallbackValue = false
     writeJson(join(this.dir, PERMISSION_FILE), { preset })
   }
 
@@ -218,9 +227,23 @@ export function defaultMillifraction(platform: NodeJS.Platform = process.platfor
   return platform === 'win32'
 }
 
-function readPermission(dir: string): PermissionPreset {
-  const preset = record(readJson(join(dir, PERMISSION_FILE)))?.preset
-  return isPermissionPreset(preset) ? preset : 'danger-full-access'
+function readPermission(dir: string): { preset: PermissionPreset; fallback: boolean } {
+  let raw: string
+  try {
+    raw = readFileSync(join(dir, PERMISSION_FILE), 'utf8')
+  } catch (error) {
+    if (isEnoent(error)) return { preset: 'danger-full-access', fallback: false }
+    return { preset: 'workspace-write', fallback: true }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw) as unknown
+  } catch {
+    return { preset: 'workspace-write', fallback: true }
+  }
+  const preset = record(parsed)?.preset
+  if (isPermissionPreset(preset)) return { preset, fallback: false }
+  return { preset: 'workspace-write', fallback: true }
 }
 
 function readModels(dir: string): AgentModels {

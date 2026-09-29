@@ -8,7 +8,7 @@ import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate } from './menu.ts'
-import { attachOverlays } from './overlays.ts'
+import { attachOverlays, denyWindowPermissions } from './overlays.ts'
 import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
 
 const socketAddress = process.env.DSH_ORB_SOCKET ?? ''
@@ -50,6 +50,7 @@ if (!socketAddress || !token) {
 if (process.platform === 'darwin') app.setActivationPolicy?.('accessory')
 
 let win: BrowserWindow | undefined
+let tccWait: ((status: unknown) => void) | undefined
 let overlays: { deliver(message: unknown): boolean } | undefined
 let placement: FloatingPlacement | undefined
 let live: Socket | undefined
@@ -83,63 +84,85 @@ void app.whenReady().then(async () => {
   connect(0)
 })
 
-ipcMain.handle('orb:expand', (_event, expanded) => {
-  if (!placement || typeof expanded !== 'boolean') return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined }
+ipcMain.handle('orb:expand', (event, expanded) => {
+  if (!fromBall(event) || !placement || typeof expanded !== 'boolean') {
+    return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined }
+  }
   return placement.setExpanded(expanded)
 })
 
-ipcMain.handle('orb:move', (_event, request) => {
-  if (!placement || !isMove(request)) return { docked: undefined }
+ipcMain.handle('orb:move', (event, request) => {
+  if (!fromBall(event) || !placement || !isMove(request)) return { docked: undefined }
   return placement.move(request.x, request.y, request.canDock)
 })
 
-ipcMain.handle('orb:clamp', async (_event, canDock) => {
-  if (!placement) return { docked: undefined }
+ipcMain.handle('orb:clamp', async (event, canDock) => {
+  if (!fromBall(event) || !placement) return { docked: undefined }
   return placement.clamp(canDock !== false)
 })
 
-ipcMain.handle('orb:unsnap', async () => {
-  if (!placement) return { docked: undefined }
+ipcMain.handle('orb:unsnap', async (event) => {
+  if (!fromBall(event) || !placement) return { docked: undefined }
   return placement.unsnap()
 })
 
-ipcMain.on('orb:prompt', (_event, text) => {
+ipcMain.on('orb:prompt', (event, text) => {
+  if (!fromBall(event)) return
   write({ type: 'prompt', text })
 })
 
-ipcMain.on('orb:question-answer', (_event, payload) => {
+ipcMain.on('orb:question-answer', (event, payload) => {
+  if (!fromBall(event)) return
   if (typeof payload !== 'object' || payload === null) return
   const record = payload as { id?: unknown; answers?: unknown }
   write({ type: 'question-answer', id: record.id, answers: record.answers })
 })
 
-ipcMain.on('orb:question-cancel', (_event, id) => {
+ipcMain.on('orb:question-cancel', (event, id) => {
+  if (!fromBall(event)) return
   write({ type: 'question-cancel', id })
 })
 
-ipcMain.on('orb:history', () => {
+ipcMain.on('orb:history', (event) => {
+  if (!fromBall(event)) return
   write({ type: 'history' })
 })
 
-ipcMain.on('orb:open', (_event, sessionId) => {
+ipcMain.on('orb:open', (event, sessionId) => {
+  if (!fromBall(event)) return
   if (typeof sessionId === 'string') write({ type: 'open', sessionId })
 })
 
-ipcMain.on('orb:new', () => {
+ipcMain.on('orb:new', (event) => {
+  if (!fromBall(event)) return
   write({ type: 'new' })
 })
 
-ipcMain.on('orb:permission', (_event, preset) => {
+ipcMain.on('orb:permission', (event, preset) => {
+  if (!fromBall(event)) return
   if (typeof preset === 'string') write({ type: 'permission', preset })
 })
 
-ipcMain.on('orb:stop', () => {
+ipcMain.on('orb:stop', (event) => {
+  if (!fromBall(event)) return
   write({ type: 'stop' })
 })
 
-ipcMain.handle('orb:menu', async () => {
+ipcMain.handle('orb:menu', async (event) => {
+  if (!fromBall(event) || !win) return
   write({ type: 'menu' })
-  if (win) await showMenu(win)
+  await showMenu(win)
+})
+
+ipcMain.handle('orb:tcc-status', (event) => {
+  if (!fromBall(event)) return tccUnavailable()
+  return askTcc({ type: 'tcc' })
+})
+
+ipcMain.handle('orb:tcc-open', (event, right) => {
+  if (!fromBall(event)) return tccUnavailable()
+  if (right !== 'screen' && right !== 'accessibility') return tccUnavailable()
+  return askTcc({ type: 'tcc-open', right })
 })
 
 function openWindow(): BrowserWindow {
@@ -173,6 +196,7 @@ function openWindow(): BrowserWindow {
     },
   })
   created.setContentProtection(true)
+  denyWindowPermissions(created)
   created.setAlwaysOnTop(true, 'screen-saver')
   if (process.platform === 'darwin') {
     created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
@@ -298,7 +322,41 @@ function deliver(message: unknown): void {
   if (record.type === 'avatar') {
     const version = (record as { version?: unknown }).version
     void loadAvatar(typeof version === 'number' ? version : 0)
+    return
   }
+  if (record.type === 'tcc') {
+    const wait = tccWait
+    tccWait = undefined
+    wait?.((record as { status?: unknown }).status)
+  }
+}
+
+function fromBall(event: unknown): boolean {
+  if (!win || win.isDestroyed()) return false
+  return (event as { sender?: BrowserWindow['webContents'] }).sender === win.webContents
+}
+
+function tccUnavailable(): { applicable: false; appName: string; screen: 'granted'; accessibility: 'granted' } {
+  return { applicable: false, appName: '', screen: 'granted', accessibility: 'granted' }
+}
+
+function askTcc(message: unknown): Promise<unknown> {
+  const previous = tccWait
+  tccWait = undefined
+  previous?.(tccUnavailable())
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (tccWait !== finish) return
+      tccWait = undefined
+      resolve(tccUnavailable())
+    }, 3000)
+    const finish = (status: unknown) => {
+      clearTimeout(timer)
+      resolve(status ?? tccUnavailable())
+    }
+    tccWait = finish
+    write(message)
+  })
 }
 
 function write(message: unknown): void {

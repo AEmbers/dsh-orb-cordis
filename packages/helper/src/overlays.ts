@@ -20,8 +20,14 @@ interface OverlayDeps {
   write: (message: unknown) => void
 }
 
+export function denyWindowPermissions(created: BrowserWindow): void {
+  created.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
+    callback(false)
+  })
+}
+
 export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(message: unknown): boolean }> {
-  const preload = fileURLToPath(new URL('../preload.cjs', import.meta.url))
+  const preload = fileURLToPath(new URL('../selection-preload.cjs', import.meta.url))
   const toolbar = openToolbar(preload)
   const frame = openFrame()
   let barOrigin = { x: 0, y: 0 }
@@ -31,15 +37,16 @@ export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(messa
     toolbar.webContents.send('orb:selection-state', { language })
   })
 
-  ipcMain.handle('orb:selection-size', (_event, size) => {
-    if (!isSize(size) || toolbar.isDestroyed()) return { menuAbove: false }
+  ipcMain.handle('orb:selection-size', (event, size) => {
+    if (!fromToolbar(event, toolbar) || !isSize(size) || toolbar.isDestroyed()) return { menuAbove: false }
     const work = workAreaOf(barOrigin)
     const bounds = selectionToolbarMenuBounds(barOrigin, size, work)
     toolbar.setBounds(bounds)
     return { menuAbove: bounds.y < barOrigin.y }
   })
 
-  ipcMain.on('orb:selection-action', (_event, payload) => {
+  ipcMain.on('orb:selection-action', (event, payload) => {
+    if (!fromToolbar(event, toolbar)) return
     if (typeof payload !== 'object' || payload === null) return
     const record = payload as { action?: unknown; language?: unknown }
     if (record.action !== 'search' && record.action !== 'translate'
@@ -193,6 +200,12 @@ function readRect(value: unknown): OverlayRect | undefined {
   return { x: record.x, y: record.y, width: record.width, height: record.height }
 }
 
+function fromToolbar(event: unknown, toolbar: BrowserWindow): boolean {
+  if (toolbar.isDestroyed()) return false
+  const sender = (event as { sender?: BrowserWindow['webContents'] }).sender
+  return sender === toolbar.webContents
+}
+
 function isSize(value: unknown): value is { width: number; height: number } {
   if (typeof value !== 'object' || value === null) return false
   const size = value as { width?: unknown; height?: unknown }
@@ -228,6 +241,7 @@ function openToolbar(preload: string): BrowserWindow {
     },
   })
   protect(created, 'screen-saver')
+  denyWindowPermissions(created)
   return created
 }
 
@@ -257,6 +271,7 @@ function openFrame(): BrowserWindow {
     },
   })
   protect(created, 'floating')
+  denyWindowPermissions(created)
   created.setIgnoreMouseEvents(true, { forward: true })
   return created
 }

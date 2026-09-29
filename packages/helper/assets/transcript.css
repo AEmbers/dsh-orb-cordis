@@ -18,6 +18,10 @@
   line-height: 1.45;
 }
 
+.block[data-kind="user"] .block-body {
+  white-space: pre-wrap;
+}
+
 .block[data-kind="user"] {
   align-self: flex-end;
   width: auto;
@@ -286,9 +290,28 @@
   border: 0;
 }
 
-.block-body {
-  white-space: pre-wrap;
+.block-body,
+.think-body {
+  white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.block-body ul,
+.block-body ol,
+.think-body ul,
+.think-body ol {
+  margin: 0.4em 0;
+  padding-left: 1.2em;
+}
+
+.block-body pre,
+.think-body pre {
+  margin: 0.4em 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--input-bg);
+  border-radius: 8px;
 }
 
 .block code {

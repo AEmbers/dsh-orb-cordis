@@ -52,9 +52,10 @@ describe('selection lines', () => {
     assert.equal(draggedFarEnough(0, 7), false)
   })
 
-  it('keeps the monitor on a private run loop and does not load the addon', () => {
+  it('keeps the macOS monitor on a private run loop and the Windows hooks on a worker', () => {
     const swift = readFileSync(join(here, '../../native-selection/src/macos-selection.swift'), 'utf8')
-    const napi = readFileSync(join(here, '../../native-selection/src/macos-selection-napi.c'), 'utf8')
+    const worker = readFileSync(join(here, '../../native-selection/src/windows-hook-worker.js'), 'utf8')
+    const hooks = readFileSync(join(here, '../../native-selection/src/windows-native.js'), 'utf8')
     assert.match(swift, /CFRunLoopRun/)
     assert.match(swift, /tapCreate/)
     assert.match(swift, /shouldRead/)
@@ -62,8 +63,10 @@ describe('selection lines', () => {
     assert.match(swift, /@_cdecl\("dsh_macos_selection_start"\)/)
     assert.equal(swift.includes('setActivationPolicy'), false)
     assert.equal(swift.includes('DispatchQueue.main.sync'), false)
-    assert.match(napi, /napi_create_threadsafe_function/)
-    assert.match(napi, /dsh_macos_selection_last_front_pid/)
+    assert.match(worker, /GetMessageW/)
+    assert.match(worker, /SetWindowsHookExW/)
+    assert.match(hooks, /worker_threads/)
+    assert.match(hooks, /PostThreadMessageW/)
   })
 })
 

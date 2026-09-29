@@ -17,8 +17,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
-    "presets"
+    "lib"
   ],
   "scripts": {
     "build": "tsdown && node ./scripts/copy-native.mjs",

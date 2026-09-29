@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('dshOrb', {
   openMenu() {
     return ipcRenderer.invoke('orb:menu')
   },
+  tccStatus() {
+    return ipcRenderer.invoke('orb:tcc-status')
+  },
+  openTcc(right) {
+    return ipcRenderer.invoke('orb:tcc-open', right)
+  },
   onBlock(callback) {
     ipcRenderer.on('orb:block', (_event, block) => callback(block))
   },
@@ -75,25 +81,5 @@ contextBridge.exposeInMainWorld('dshOrb', {
   },
   onAttach(callback) {
     ipcRenderer.on('orb:attach', (_event, text) => callback(text))
-  },
-  selection: {
-    search() {
-      ipcRenderer.send('orb:selection-action', { action: 'search' })
-    },
-    translate() {
-      ipcRenderer.send('orb:selection-action', { action: 'translate' })
-    },
-    sendToAgent() {
-      ipcRenderer.send('orb:selection-action', { action: 'send' })
-    },
-    setLanguage(language) {
-      ipcRenderer.send('orb:selection-action', { action: 'language', language })
-    },
-    setContentSize(size) {
-      return ipcRenderer.invoke('orb:selection-size', size)
-    },
-    onState(callback) {
-      ipcRenderer.on('orb:selection-state', (_event, state) => callback(state))
-    },
   },
 })

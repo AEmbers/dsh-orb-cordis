@@ -581,8 +581,13 @@ function pointInRect(point, bounds) {
 * Selection toolbar and observation frame.
 * Both windows, like the ball, opt out of screen capture.
 */
+function denyWindowPermissions(created) {
+	created.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
+		callback(false);
+	});
+}
 async function attachOverlays(deps) {
-	const toolbar = openToolbar(fileURLToPath(new URL("../preload.cjs", import.meta.url)));
+	const toolbar = openToolbar(fileURLToPath(new URL("../selection-preload.cjs", import.meta.url)));
 	const frame = openFrame();
 	let barOrigin = {
 		x: 0,
@@ -592,14 +597,15 @@ async function attachOverlays(deps) {
 	toolbar.webContents.on("did-finish-load", () => {
 		toolbar.webContents.send("orb:selection-state", { language });
 	});
-	ipcMain.handle("orb:selection-size", (_event, size) => {
-		if (!isSize(size) || toolbar.isDestroyed()) return { menuAbove: false };
+	ipcMain.handle("orb:selection-size", (event, size) => {
+		if (!fromToolbar(event, toolbar) || !isSize(size) || toolbar.isDestroyed()) return { menuAbove: false };
 		const work = workAreaOf(barOrigin);
 		const bounds = selectionToolbarMenuBounds(barOrigin, size, work);
 		toolbar.setBounds(bounds);
 		return { menuAbove: bounds.y < barOrigin.y };
 	});
-	ipcMain.on("orb:selection-action", (_event, payload) => {
+	ipcMain.on("orb:selection-action", (event, payload) => {
+		if (!fromToolbar(event, toolbar)) return;
 		if (typeof payload !== "object" || payload === null) return;
 		const record = payload;
 		if (record.action !== "search" && record.action !== "translate" && record.action !== "send" && record.action !== "language") return;
@@ -757,6 +763,10 @@ function readRect(value) {
 		height: record.height
 	};
 }
+function fromToolbar(event, toolbar) {
+	if (toolbar.isDestroyed()) return false;
+	return event.sender === toolbar.webContents;
+}
 function isSize(value) {
 	if (typeof value !== "object" || value === null) return false;
 	const size = value;
@@ -789,6 +799,7 @@ function openToolbar(preload) {
 		}
 	});
 	protect(created, "screen-saver");
+	denyWindowPermissions(created);
 	return created;
 }
 function openFrame() {
@@ -817,6 +828,7 @@ function openFrame() {
 		}
 	});
 	protect(created, "floating");
+	denyWindowPermissions(created);
 	created.setIgnoreMouseEvents(true, { forward: true });
 	return created;
 }
@@ -861,6 +873,7 @@ if (!socketAddress || !token) {
 }
 if (process.platform === "darwin") app.setActivationPolicy?.("accessory");
 let win;
+let tccWait;
 let overlays;
 let placement;
 let live;
@@ -900,8 +913,8 @@ app.whenReady().then(async () => {
 	await win.loadFile(fileURLToPath(new URL("../assets/floating.html", import.meta.url)));
 	connect(0);
 });
-ipcMain.handle("orb:expand", (_event, expanded) => {
-	if (!placement || typeof expanded !== "boolean") return {
+ipcMain.handle("orb:expand", (event, expanded) => {
+	if (!fromBall(event) || !placement || typeof expanded !== "boolean") return {
 		expanded: false,
 		horizontal: "left",
 		vertical: "up",
@@ -909,25 +922,27 @@ ipcMain.handle("orb:expand", (_event, expanded) => {
 	};
 	return placement.setExpanded(expanded);
 });
-ipcMain.handle("orb:move", (_event, request) => {
-	if (!placement || !isMove(request)) return { docked: void 0 };
+ipcMain.handle("orb:move", (event, request) => {
+	if (!fromBall(event) || !placement || !isMove(request)) return { docked: void 0 };
 	return placement.move(request.x, request.y, request.canDock);
 });
-ipcMain.handle("orb:clamp", async (_event, canDock) => {
-	if (!placement) return { docked: void 0 };
+ipcMain.handle("orb:clamp", async (event, canDock) => {
+	if (!fromBall(event) || !placement) return { docked: void 0 };
 	return placement.clamp(canDock !== false);
 });
-ipcMain.handle("orb:unsnap", async () => {
-	if (!placement) return { docked: void 0 };
+ipcMain.handle("orb:unsnap", async (event) => {
+	if (!fromBall(event) || !placement) return { docked: void 0 };
 	return placement.unsnap();
 });
-ipcMain.on("orb:prompt", (_event, text) => {
+ipcMain.on("orb:prompt", (event, text) => {
+	if (!fromBall(event)) return;
 	write({
 		type: "prompt",
 		text
 	});
 });
-ipcMain.on("orb:question-answer", (_event, payload) => {
+ipcMain.on("orb:question-answer", (event, payload) => {
+	if (!fromBall(event)) return;
 	if (typeof payload !== "object" || payload === null) return;
 	const record = payload;
 	write({
@@ -936,36 +951,55 @@ ipcMain.on("orb:question-answer", (_event, payload) => {
 		answers: record.answers
 	});
 });
-ipcMain.on("orb:question-cancel", (_event, id) => {
+ipcMain.on("orb:question-cancel", (event, id) => {
+	if (!fromBall(event)) return;
 	write({
 		type: "question-cancel",
 		id
 	});
 });
-ipcMain.on("orb:history", () => {
+ipcMain.on("orb:history", (event) => {
+	if (!fromBall(event)) return;
 	write({ type: "history" });
 });
-ipcMain.on("orb:open", (_event, sessionId) => {
+ipcMain.on("orb:open", (event, sessionId) => {
+	if (!fromBall(event)) return;
 	if (typeof sessionId === "string") write({
 		type: "open",
 		sessionId
 	});
 });
-ipcMain.on("orb:new", () => {
+ipcMain.on("orb:new", (event) => {
+	if (!fromBall(event)) return;
 	write({ type: "new" });
 });
-ipcMain.on("orb:permission", (_event, preset) => {
+ipcMain.on("orb:permission", (event, preset) => {
+	if (!fromBall(event)) return;
 	if (typeof preset === "string") write({
 		type: "permission",
 		preset
 	});
 });
-ipcMain.on("orb:stop", () => {
+ipcMain.on("orb:stop", (event) => {
+	if (!fromBall(event)) return;
 	write({ type: "stop" });
 });
-ipcMain.handle("orb:menu", async () => {
+ipcMain.handle("orb:menu", async (event) => {
+	if (!fromBall(event) || !win) return;
 	write({ type: "menu" });
-	if (win) await showMenu(win);
+	await showMenu(win);
+});
+ipcMain.handle("orb:tcc-status", (event) => {
+	if (!fromBall(event)) return tccUnavailable();
+	return askTcc({ type: "tcc" });
+});
+ipcMain.handle("orb:tcc-open", (event, right) => {
+	if (!fromBall(event)) return tccUnavailable();
+	if (right !== "screen" && right !== "accessibility") return tccUnavailable();
+	return askTcc({
+		type: "tcc-open",
+		right
+	});
 });
 function openWindow() {
 	const bounds = initialWindowBounds(screen.getPrimaryDisplay().workArea);
@@ -998,6 +1032,7 @@ function openWindow() {
 		}
 	});
 	created.setContentProtection(true);
+	denyWindowPermissions(created);
 	created.setAlwaysOnTop(true, "screen-saver");
 	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
 		visibleOnFullScreen: true,
@@ -1129,7 +1164,43 @@ function deliver(message) {
 	if (record.type === "avatar") {
 		const version = record.version;
 		loadAvatar(typeof version === "number" ? version : 0);
+		return;
 	}
+	if (record.type === "tcc") {
+		const wait = tccWait;
+		tccWait = void 0;
+		wait?.(record.status);
+	}
+}
+function fromBall(event) {
+	if (!win || win.isDestroyed()) return false;
+	return event.sender === win.webContents;
+}
+function tccUnavailable() {
+	return {
+		applicable: false,
+		appName: "",
+		screen: "granted",
+		accessibility: "granted"
+	};
+}
+function askTcc(message) {
+	const previous = tccWait;
+	tccWait = void 0;
+	previous?.(tccUnavailable());
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => {
+			if (tccWait !== finish) return;
+			tccWait = void 0;
+			resolve(tccUnavailable());
+		}, 3e3);
+		const finish = (status) => {
+			clearTimeout(timer);
+			resolve(status ?? tccUnavailable());
+		};
+		tccWait = finish;
+		write(message);
+	});
 }
 function write(message) {
 	if (!live) return;
