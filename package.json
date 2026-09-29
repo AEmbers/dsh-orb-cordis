@@ -7,7 +7,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --if-present build"
+    "build": "pnpm -r --if-present build",
+    "test": "node --experimental-transform-types --disable-warning=ExperimentalWarning --test --test-isolation=process packages/host/tests/*.test.ts packages/helper/tests/*.test.ts packages/client-settings/tests/*.test.mjs"
   },
   "devDependencies": {
     "tsdown": "^0.22.2",

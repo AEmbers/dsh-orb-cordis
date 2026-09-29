@@ -21,7 +21,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@dsh-orb/helper": "file:../helper"
+    "@dsh-orb/helper": "file:../helper",
+    "koffi": "^3.1.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-home-paths": ">=0.1.7-rc.2 <0.3.0"

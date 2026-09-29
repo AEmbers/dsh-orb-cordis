@@ -1,0 +1,103 @@
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, describe, it } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  ProfileStore,
+  defaultMillifraction,
+  profileDirectory,
+  sniffAvatarMime,
+} from '../src/preferences.ts'
+
+const root = mkdtempSync(join(tmpdir(), 'orb-prefs-'))
+after(() => { rmSync(root, { recursive: true, force: true }) })
+
+function dir(name: string): string {
+  const path = join(root, name)
+  mkdirSync(path, { recursive: true })
+  return path
+}
+
+describe('profile preferences', () => {
+  it('uses the shipped defaults when the profile files are missing', () => {
+    const store = new ProfileStore(dir('empty'))
+    assert.equal(store.permission(), 'danger-full-access')
+    assert.deepEqual(store.models().overlay, {
+      provider: 'deepseek-official',
+      model: 'deepseek-flash',
+      reasoningEffort: 'max',
+    })
+    assert.deepEqual(store.models().background, store.models().overlay)
+    assert.equal(store.millifractionEnabled(), defaultMillifraction())
+    assert.equal(store.coordinateMode(), defaultMillifraction() ? 'millifraction' : 'pixel')
+    assert.equal(store.selectionEnabled(), true)
+    assert.equal(store.ballEnabled(), true)
+    assert.equal(store.avatarVersion(), 0)
+    assert.equal(store.readAvatar(), undefined)
+  })
+
+  it('keeps the two model tracks and the selection language apart', () => {
+    const path = dir('models')
+    writeFileSync(join(path, 'selection-toolbar.json'), JSON.stringify({
+      enabled: false,
+      translateTargetLanguage: 'en',
+    }))
+    const store = new ProfileStore(path)
+    assert.equal(store.selectionEnabled(), false)
+    store.setOverlay({ provider: 'deepseek-official', model: 'deepseek-pro', reasoningEffort: 'high' })
+    store.setBackground({ provider: 'other', model: 'background-model' })
+    store.setSelectionEnabled(true)
+    const models = JSON.parse(readFileSync(join(path, 'orb-agent-models.json'), 'utf8')) as {
+      overlay: { model: string }
+      background: { model: string; reasoningEffort?: string }
+    }
+    assert.equal(models.overlay.model, 'deepseek-pro')
+    assert.equal(models.background.model, 'background-model')
+    assert.equal(models.background.reasoningEffort, undefined)
+    const selection = JSON.parse(readFileSync(join(path, 'selection-toolbar.json'), 'utf8')) as {
+      enabled: boolean
+      translateTargetLanguage: string
+    }
+    assert.equal(selection.enabled, true)
+    assert.equal(selection.translateTargetLanguage, 'en')
+    assert.equal(store.coordinateMode(), 'pixel')
+    store.setMillifractionEnabled(true)
+    assert.equal(store.coordinateMode(), 'millifraction')
+    assert.equal(JSON.parse(readFileSync(join(path, 'millifraction-coordinates.json'), 'utf8')).enabled, true)
+  })
+
+  it('turns the ball off in ball-enabled.json and accepts only gif, png, and webp avatars', () => {
+    const path = dir('avatar')
+    const store = new ProfileStore(path)
+    store.setPermission('read-only')
+    store.setBallEnabled(false)
+    assert.equal(JSON.parse(readFileSync(join(path, 'orb-permission.json'), 'utf8')).preset, 'read-only')
+    assert.equal(JSON.parse(readFileSync(join(path, 'ball-enabled.json'), 'utf8')).enabled, false)
+    assert.equal(new ProfileStore(path).ballEnabled(), false)
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+    const gif = Buffer.from('GIF89a', 'ascii')
+    const webp = Buffer.from('RIFF\0\0\0\0WEBP', 'ascii')
+    assert.equal(sniffAvatarMime(png), 'image/png')
+    assert.equal(sniffAvatarMime(gif), 'image/gif')
+    assert.equal(sniffAvatarMime(webp), 'image/webp')
+    assert.equal(sniffAvatarMime(Buffer.from('not-an-image')), undefined)
+    store.writeAvatar(png, 'image/png')
+    assert.equal(store.readAvatar()?.mime, 'image/png')
+    assert.ok(store.avatarVersion() > 0)
+    writeFileSync(join(path, 'orb-avatar.json'), JSON.stringify({ mime: 'image/gif' }))
+    assert.equal(new ProfileStore(path).readAvatar(), undefined)
+    store.restoreAvatar()
+    assert.equal(store.readAvatar(), undefined)
+    assert.equal(store.avatarVersion(), 0)
+  })
+
+  it('reads the official profile directory', () => {
+    assert.equal(profileDirectory({ get: () => ({ dir: '/tmp/dsh-profile' }) }), '/tmp/dsh-profile')
+    const fallback = profileDirectory({ get: () => undefined })
+    assert.equal(fallback, process.cwd())
+    assert.equal(defaultMillifraction('win32'), true)
+    assert.equal(defaultMillifraction('darwin'), false)
+    assert.equal(defaultMillifraction('linux'), false)
+  })
+})

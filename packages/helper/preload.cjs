@@ -22,6 +22,24 @@ contextBridge.exposeInMainWorld('dshOrb', {
   cancelQuestion(id) {
     ipcRenderer.send('orb:question-cancel', id)
   },
+  requestHistory() {
+    ipcRenderer.send('orb:history')
+  },
+  openSession(id) {
+    ipcRenderer.send('orb:open', id)
+  },
+  newSession() {
+    ipcRenderer.send('orb:new')
+  },
+  setPermission(preset) {
+    ipcRenderer.send('orb:permission', preset)
+  },
+  stop() {
+    ipcRenderer.send('orb:stop')
+  },
+  openMenu() {
+    return ipcRenderer.invoke('orb:menu')
+  },
   onBlock(callback) {
     ipcRenderer.on('orb:block', (_event, block) => callback(block))
   },
@@ -42,5 +60,17 @@ contextBridge.exposeInMainWorld('dshOrb', {
   },
   onQuestionError(callback) {
     ipcRenderer.on('orb:question-error', (_event, payload) => callback(payload))
+  },
+  onHistory(callback) {
+    ipcRenderer.on('orb:history', (_event, items) => callback(items))
+  },
+  onPermission(callback) {
+    ipcRenderer.on('orb:permission', (_event, preset) => callback(preset))
+  },
+  onReset(callback) {
+    ipcRenderer.on('orb:reset', () => callback())
+  },
+  onAvatar(callback) {
+    ipcRenderer.on('orb:avatar', (_event, src) => callback(src))
   },
 })

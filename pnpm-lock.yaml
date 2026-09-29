@@ -17,12 +17,17 @@ importers:
 
   packages/bundle:
     dependencies:
+      '@dsh-orb/client-ui-settings-orb':
+        specifier: file:../client-settings
+        version: link:../client-settings
       '@dsh-orb/computer-use':
         specifier: file:../computer-use
         version: link:../computer-use
       '@dsh-orb/host':
         specifier: file:../host
         version: link:../host
+
+  packages/client-settings: {}
 
   packages/computer-use:
     dependencies:
@@ -80,6 +85,9 @@ importers:
       '@dsh-orb/helper':
         specifier: file:../helper
         version: link:../helper
+      koffi:
+        specifier: ^3.1.0
+        version: 3.3.1
     devDependencies:
       '@deepseek-ai/dsh-home-paths':
         specifier: 0.1.7-rc.2

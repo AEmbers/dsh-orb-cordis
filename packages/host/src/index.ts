@@ -1,8 +1,12 @@
 /**
  * Host-side Orb plugin.
- * The ball is a separate Electron process. This plugin owns the socket and the Computer Use session.
+ * The ball is a separate Electron process. This plugin owns the socket, the preferences, and the Computer Use session.
  */
 
+import { TccMonitor } from './tcc.ts'
+import { profileDirectory, ProfileStore } from './preferences.ts'
+import { registerOrbRoutes } from './routes.ts'
+import { installOrbServices, watchOrbPermissions } from './services.ts'
 import { OrbRuntime, type OrbContext } from './orb.ts'
 
 /** Cordis plugin name. */
@@ -20,22 +24,33 @@ export const inject = [
 export type { OrbContext }
 
 /**
- * Log the web port, then start the ball unless this is Linux or autoStart is off.
+ * Register preferences, Computer Use services, and settings routes, then start the ball.
+ * Linux never starts the helper. `autoStart: false` and `ball-enabled.json` leave Computer Use in the main window.
  * @param ctx - host services named in {@link inject}.
- * @param config - patch config. `autoStart: false` leaves Computer Use in the main window only.
+ * @param config - patch config. `autoStart: false` skips the helper until settings turn it back on.
  */
 export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): void {
   logWebPort(ctx)
-  if (process.platform === 'linux' || config.autoStart === false) return
-  const runtime = new OrbRuntime(ctx)
+  const store = new ProfileStore(profileDirectory(ctx))
+  const tcc = new TccMonitor()
+  const runtime = new OrbRuntime(ctx, store)
+  installOrbServices(ctx, store)
+  console.error(`dsh-orb: profile ${store.dir}`)
   ctx.effect(() => {
-    const detach = runtime.attachQuestions()
-    void runtime.start().catch((error: unknown) => {
-      console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`)
-    })
+    const detachQuestions = runtime.attachQuestions()
+    const detachPermissions = watchOrbPermissions(ctx, store)
+    const detachRoutes = registerOrbRoutes({ ctx, store, tcc, control: runtime })
+    const start = process.platform !== 'linux' && config.autoStart !== false && store.ballEnabled()
+    if (start) {
+      void runtime.start().catch((error: unknown) => {
+        console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
     return () => {
-      detach()
-      runtime.stop()
+      detachQuestions()
+      detachPermissions()
+      detachRoutes()
+      runtime.halt()
     }
   })
 }

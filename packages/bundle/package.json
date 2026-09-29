@@ -24,6 +24,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@dsh-orb/client-ui-settings-orb": "file:../client-settings",
     "@dsh-orb/computer-use": "file:../computer-use",
     "@dsh-orb/host": "file:../host"
   },

@@ -1,0 +1,34 @@
+{
+  "name": "@dsh-orb/client-ui-settings-orb",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Settings page for the floating ball. Avatar, both Agent models, the selection switch, and millifraction coordinates.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/index.d.ts",
+    "client.js"
+  ],
+  "scripts": {
+    "build": "tsdown"
+  },
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  }
+}

@@ -15,6 +15,7 @@ const zh = {
   fresh: '新建',
   history: '历史',
   historyEmpty: '还没有 Computer Use 对话。',
+  untitled: '未命名对话',
   placeholder: '向桌面 agent 发送消息…',
   accessReadOnly: '仅可查看',
   accessWrite: '工作区内修改',
@@ -35,6 +36,7 @@ const en = {
   fresh: 'New',
   history: 'History',
   historyEmpty: 'No Computer Use chats yet.',
+  untitled: 'Untitled',
   placeholder: 'Ask the desktop agent…',
   accessReadOnly: 'Read Only',
   accessWrite: 'Workspace Write',
@@ -205,6 +207,9 @@ function main() {
   let permissionOpen = false
   let historyOpen = false
   let pending
+  let sessionId = ''
+  let avatarSrc = 'deepseek-avatar-square.gif'
+  let historyItems = []
   const blocks = new Map()
 
   function pageClosed() {
@@ -241,13 +246,13 @@ function main() {
     if (play) {
       if (gif.dataset.mode !== 'play') {
         gif.dataset.mode = 'play'
-        gif.src = 'deepseek-avatar-square.gif'
+        gif.src = avatarSrc
       }
       return
     }
     if (gif.dataset.mode === 'still') return
     gif.dataset.mode = 'still'
-    gif.src = 'deepseek-avatar-square.gif'
+    gif.src = avatarSrc
     freezeGif(gif)
   }
 
@@ -442,16 +447,44 @@ function main() {
     transcript.scrollTop = transcript.scrollHeight
   }
 
+  function renderHistory() {
+    historyList.replaceChildren()
+    if (historyItems.length === 0) {
+      const empty = document.createElement('p')
+      empty.className = 'history-empty'
+      empty.textContent = messages.historyEmpty
+      historyList.append(empty)
+      return
+    }
+    for (const item of historyItems) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = item.sessionId === sessionId ? 'history-row current' : 'history-row'
+      button.setAttribute('role', 'option')
+      button.setAttribute('aria-selected', String(item.sessionId === sessionId))
+      button.textContent = typeof item.title === 'string' && item.title !== '' ? item.title : messages.untitled
+      button.addEventListener('click', () => {
+        setHistoryOpen(false)
+        if (item.sessionId !== sessionId) api.openSession(item.sessionId)
+      })
+      historyList.append(button)
+    }
+  }
+
+  function clearTranscript() {
+    blocks.clear()
+    transcript.replaceChildren()
+    pending = undefined
+    syncQuestion()
+  }
+
   function setHistoryOpen(next) {
     historyOpen = next
     historyList.hidden = !historyOpen
     historyButton.setAttribute('aria-pressed', String(historyOpen))
     if (historyOpen) {
-      historyList.replaceChildren()
-      const empty = document.createElement('p')
-      empty.className = 'history-empty'
-      empty.textContent = messages.historyEmpty
-      historyList.append(empty)
+      renderHistory()
+      api.requestHistory()
       setPermissionOpen(false)
     }
     syncQuestion()
@@ -796,6 +829,7 @@ function main() {
       permission = preset
       setPermissionOpen(false)
       renderPermission()
+      api.setPermission(preset)
     })
     item.append(option)
     permissionMenu.append(item)
@@ -814,8 +848,10 @@ function main() {
   newConversation.addEventListener('click', () => {
     setHistoryOpen(false)
     setPermissionOpen(false)
+    api.newSession()
     prompt.focus()
   })
+  stop.addEventListener('click', () => { api.stop() })
   questionCancel.addEventListener('click', cancelQuestion)
   questionSkip.addEventListener('click', skipQuestion)
   questionContinue.addEventListener('click', continueFlow)
@@ -850,6 +886,24 @@ function main() {
 
   api.onBlock(upsertBlock)
   api.onTurn((turn) => { setRunning(turn?.running === true) })
+  api.onSession((id) => { sessionId = typeof id === 'string' ? id : '' })
+  api.onHistory((items) => {
+    historyItems = Array.isArray(items) ? items : []
+    if (historyOpen) renderHistory()
+  })
+  api.onPermission((preset) => {
+    if (typeof preset !== 'string') return
+    permission = preset
+    renderPermission()
+  })
+  api.onReset(() => { clearTranscript() })
+  api.onAvatar((src) => {
+    avatarSrc = typeof src === 'string' && src !== '' ? src : 'deepseek-avatar-square.gif'
+    const gif = document.querySelector('#ball-gif')
+    if (!gif) return
+    delete gif.dataset.mode
+    syncGif()
+  })
   api.onStatus((text) => { status.textContent = typeof text === 'string' ? text : '' })
   api.onQuestion((payload) => { showQuestion(payload) })
   api.onQuestionClear((id) => { clearQuestion(id) })

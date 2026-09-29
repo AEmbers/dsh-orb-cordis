@@ -14,7 +14,7 @@ declare module 'electron' {
   interface WebContents {
     send(channel: string, ...args: unknown[]): void
     setWindowOpenHandler(handler: () => { action: 'deny' }): void
-    on(event: 'will-navigate' | 'did-finish-load', listener: (event: { preventDefault(): void }) => void): void
+    on(event: 'will-navigate' | 'did-finish-load' | 'context-menu', listener: (event: { preventDefault(): void }, params?: { isEditable?: boolean }) => void): void
   }
 
   interface BrowserWindow {
@@ -65,9 +65,35 @@ declare module 'electron' {
     whenReady(): Promise<void>
     quit(): void
     exit(code: number): void
+    getLocale?(): string
     setActivationPolicy?(policy: 'accessory'): void
     dock?: { hide(): void }
     on(event: 'before-quit' | 'window-all-closed', listener: () => void): void
+  }
+
+  export interface MenuItemOptions {
+    label?: string
+    type?: 'checkbox' | 'radio' | 'separator' | 'normal'
+    checked?: boolean
+    enabled?: boolean
+    submenu?: MenuItemOptions[]
+    click?: (item: { checked: boolean }) => void
+  }
+
+  export const Menu: {
+    buildFromTemplate(template: readonly MenuItemOptions[]): { popup(options?: { window?: BrowserWindow }): void }
+  }
+
+  export const dialog: {
+    showMessageBox(window: BrowserWindow, options: {
+      type?: string
+      message: string
+      detail?: string
+      buttons?: string[]
+      defaultId?: number
+      cancelId?: number
+      noLink?: boolean
+    }): Promise<{ response: number }>
   }
 
   export const screen: {

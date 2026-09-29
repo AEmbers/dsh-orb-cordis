@@ -66,3 +66,5 @@
       name: '@dsh-orb/host'
       config:
         autoStart: true
+    - id: ui-settings-orb
+      name: '@dsh-orb/client-ui-settings-orb'

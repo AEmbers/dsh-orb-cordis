@@ -2,13 +2,40 @@
  * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
  */
 
-import { app, BrowserWindow, ipcMain, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, screen } from 'electron'
+import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
+import { contextMenuTemplate } from './menu.ts'
+import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
 
 const socketAddress = process.env.DSH_ORB_SOCKET ?? ''
 const token = process.env.DSH_ORB_TOKEN ?? ''
+const webPort = process.env.DSH_ORB_WEB_PORT ?? ''
+
+interface ChromeState {
+  overlay: MenuSelection
+  background: MenuSelection
+  selectionEnabled: boolean
+  millifractionEnabled: boolean
+  catalog: MenuCatalog
+}
+
+const defaultSelection: MenuSelection = {
+  provider: 'deepseek-official',
+  model: 'deepseek-flash',
+  reasoningEffort: 'max',
+}
+
+let chrome: ChromeState = {
+  overlay: defaultSelection,
+  background: defaultSelection,
+  selectionEnabled: false,
+  millifractionEnabled: false,
+  catalog: { groups: [] },
+}
+let avatarToken = 0
 
 process.title = 'dsh-orb-helper'
 
@@ -81,6 +108,31 @@ ipcMain.on('orb:question-cancel', (_event, id) => {
   write({ type: 'question-cancel', id })
 })
 
+ipcMain.on('orb:history', () => {
+  write({ type: 'history' })
+})
+
+ipcMain.on('orb:open', (_event, sessionId) => {
+  if (typeof sessionId === 'string') write({ type: 'open', sessionId })
+})
+
+ipcMain.on('orb:new', () => {
+  write({ type: 'new' })
+})
+
+ipcMain.on('orb:permission', (_event, preset) => {
+  if (typeof preset === 'string') write({ type: 'permission', preset })
+})
+
+ipcMain.on('orb:stop', () => {
+  write({ type: 'stop' })
+})
+
+ipcMain.handle('orb:menu', async () => {
+  write({ type: 'menu' })
+  if (win) await showMenu(win)
+})
+
 function openWindow(): BrowserWindow {
   const bounds = initialWindowBounds(screen.getPrimaryDisplay().workArea)
   const created = new BrowserWindow({
@@ -117,6 +169,12 @@ function openWindow(): BrowserWindow {
     created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
   }
   created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  created.webContents.on('context-menu', (event, params) => {
+    if (params?.isEditable) return
+    event.preventDefault()
+    write({ type: 'menu' })
+    setTimeout(() => { void showMenu(created) }, 30)
+  })
   created.webContents.on('will-navigate', (event) => {
     event.preventDefault()
   })
@@ -206,6 +264,27 @@ function deliver(message: unknown): void {
   }
   if (record.type === 'question-error') {
     win.webContents.send('orb:question-error', message)
+    return
+  }
+  if (record.type === 'permission') {
+    win.webContents.send('orb:permission', (record as { preset?: unknown }).preset)
+    return
+  }
+  if (record.type === 'history') {
+    win.webContents.send('orb:history', (record as { items?: unknown }).items)
+    return
+  }
+  if (record.type === 'reset') {
+    win.webContents.send('orb:reset')
+    return
+  }
+  if (record.type === 'chrome') {
+    chrome = readChrome(record)
+    return
+  }
+  if (record.type === 'avatar') {
+    const version = (record as { version?: unknown }).version
+    void loadAvatar(typeof version === 'number' ? version : 0)
   }
 }
 
@@ -221,4 +300,113 @@ function isMove(value: unknown): value is { x: number; y: number; canDock: boole
     && Number.isFinite(point.x) && Number.isFinite(point.y)
     && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
     && typeof point.canDock === 'boolean'
+}
+
+function zhLocale(): boolean {
+  const locale = app.getLocale?.() ?? process.env.LANG ?? ''
+  return locale.toLowerCase().startsWith('zh')
+}
+
+function readChrome(value: unknown): ChromeState {
+  const record = value as {
+    overlay?: MenuSelection
+    background?: MenuSelection
+    selectionEnabled?: unknown
+    millifractionEnabled?: unknown
+    catalog?: MenuCatalog
+  }
+  return {
+    overlay: selectionOr(record.overlay, chrome.overlay),
+    background: selectionOr(record.background, chrome.background),
+    selectionEnabled: record.selectionEnabled === true,
+    millifractionEnabled: record.millifractionEnabled === true,
+    catalog: record.catalog ?? { groups: [] },
+  }
+}
+
+function selectionOr(value: MenuSelection | undefined, fallback: MenuSelection): MenuSelection {
+  if (!value || typeof value.provider !== 'string' || typeof value.model !== 'string') return fallback
+  return value
+}
+
+async function showMenu(window: BrowserWindow): Promise<void> {
+  const template = contextMenuTemplate(chrome, zhLocale(), {
+    openMain: () => { write({ type: 'open-main' }) },
+    setOverlay: (selection) => { write({ type: 'set-overlay', selection }) },
+    setBackground: (selection) => { write({ type: 'set-background', selection }) },
+    setSelection: (enabled) => { write({ type: 'set-selection', enabled }) },
+    setMillifraction: (enabled) => { void confirmMillifraction(window, enabled) },
+    disable: () => { write({ type: 'disable' }) },
+  })
+  Menu.buildFromTemplate(template).popup({ window })
+}
+
+async function confirmMillifraction(window: BrowserWindow, enabled: boolean): Promise<void> {
+  if (enabled === chrome.millifractionEnabled) return
+  const zh = zhLocale()
+  const { response } = await dialog.showMessageBox(window, {
+    type: 'question',
+    message: zh ? '新编码只在新对话中生效。' : 'The new encoding takes effect in a new conversation.',
+    detail: zh
+      ? '当前对话不变，仍可从历史记录打开。取消不写入、不新建。'
+      : 'The current conversation stays unchanged and remains in History. Cancel leaves the default and this chat as they are.',
+    buttons: zh ? ['取消', '新建对话'] : ['Cancel', 'Create new conversation'],
+    defaultId: 1,
+    cancelId: 0,
+    noLink: true,
+  })
+  if (response !== 1) return
+  write({ type: 'set-millifraction', enabled })
+}
+
+async function loadAvatar(version: number): Promise<void> {
+  const tokenId = ++avatarToken
+  if (!win) return
+  if (!version) {
+    win.webContents.send('orb:avatar', '')
+    return
+  }
+  const image = await fetchAvatar(version)
+  if (tokenId !== avatarToken || !win || !image) return
+  win.webContents.send('orb:avatar', `data:${image.mime};base64,${image.body.toString('base64')}`)
+}
+
+function fetchAvatar(version: number): Promise<{ mime: string; body: Buffer } | undefined> {
+  const port = Number(webPort)
+  if (!Number.isInteger(port) || port <= 0 || !token) return Promise.resolve(undefined)
+  return new Promise((resolve) => {
+    const req = httpRequest({
+      hostname: '127.0.0.1',
+      port,
+      path: `/.dsh-orb/avatar?v=${Math.trunc(version)}`,
+      method: 'GET',
+      headers: { 'x-dsh-orb-helper': token },
+    }, (res) => {
+      const chunks: Buffer[] = []
+      let size = 0
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > 2_500_000) {
+          req.destroy()
+          resolve(undefined)
+          return
+        }
+        chunks.push(chunk)
+      })
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          resolve(undefined)
+          return
+        }
+        const mime = typeof res.headers['content-type'] === 'string' ? res.headers['content-type'].split(';')[0] : 'image/gif'
+        resolve({ mime: mime ?? 'image/gif', body: Buffer.concat(chunks) })
+      })
+    })
+    req.setTimeout(5000, () => {
+      req.destroy()
+      resolve(undefined)
+    })
+    req.on('error', () => resolve(undefined))
+    req.end()
+  })
 }

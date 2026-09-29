@@ -1,0 +1,288 @@
+/**
+ * Profile files the ball and the settings page share.
+ * Names match the desktop fork so an existing profile keeps its choices.
+ */
+
+import { readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const PERMISSION_FILE = 'orb-permission.json'
+const MODELS_FILE = 'orb-agent-models.json'
+const MILLIFRACTION_FILE = 'millifraction-coordinates.json'
+const SELECTION_FILE = 'selection-toolbar.json'
+const BALL_FILE = 'ball-enabled.json'
+const AVATAR_FILE = 'orb-avatar'
+const AVATAR_META_FILE = 'orb-avatar.json'
+
+export const PERMISSION_PRESETS = ['read-only', 'workspace-write', 'danger-full-access'] as const
+
+export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
+
+export interface AgentModelSelection {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+export interface AgentModels {
+  readonly overlay: AgentModelSelection
+  readonly background: AgentModelSelection
+}
+
+export type AvatarMime = 'image/gif' | 'image/png' | 'image/webp'
+
+const DEFAULT_MODEL: AgentModelSelection = {
+  provider: 'deepseek-official',
+  model: 'deepseek-flash',
+  reasoningEffort: 'max',
+}
+
+export const MAX_AVATAR_BYTES = 2 * 1024 * 1024
+
+/**
+ * Active official profile directory.
+ * Desktop and `dsh web` both provide `profileContext.dir`. The process directory is the fallback.
+ */
+export function profileDirectory(ctx: { get(name: string): unknown }): string {
+  const profile = ctx.get('profileContext')
+  if (typeof profile === 'object' && profile !== null && 'dir' in profile) {
+    const dir = (profile as { dir?: unknown }).dir
+    if (typeof dir === 'string' && dir !== '') return dir
+  }
+  return process.cwd()
+}
+
+export function isPermissionPreset(value: unknown): value is PermissionPreset {
+  return typeof value === 'string' && (PERMISSION_PRESETS as readonly string[]).includes(value)
+}
+
+export function isAgentModelSelection(value: unknown): value is AgentModelSelection {
+  return parseSelection(value) !== undefined
+}
+
+/** In-memory view of the profile files. Writes update the cache and the disk together. */
+export class ProfileStore {
+  private permissionValue: PermissionPreset
+  private modelValue: AgentModels
+  private millifractionValue: boolean
+  private selectionValue: boolean
+  private selectionLanguage: 'zh' | 'en'
+  private ballValue: boolean
+
+  constructor(readonly dir: string) {
+    this.permissionValue = readPermission(dir)
+    this.modelValue = readModels(dir)
+    this.millifractionValue = readMillifraction(dir)
+    const selection = readSelection(dir)
+    this.selectionValue = selection.enabled
+    this.selectionLanguage = selection.language
+    this.ballValue = readBall(dir)
+  }
+
+  permission(): PermissionPreset {
+    return this.permissionValue
+  }
+
+  setPermission(preset: PermissionPreset): void {
+    this.permissionValue = preset
+    writeJson(join(this.dir, PERMISSION_FILE), { preset })
+  }
+
+  models(): AgentModels {
+    return this.modelValue
+  }
+
+  setOverlay(selection: AgentModelSelection): void {
+    this.modelValue = { overlay: selection, background: this.modelValue.background }
+    this.writeModels()
+  }
+
+  setBackground(selection: AgentModelSelection): void {
+    this.modelValue = { overlay: this.modelValue.overlay, background: selection }
+    this.writeModels()
+  }
+
+  millifractionEnabled(): boolean {
+    return this.millifractionValue
+  }
+
+  setMillifractionEnabled(enabled: boolean): void {
+    this.millifractionValue = enabled
+    writeJson(join(this.dir, MILLIFRACTION_FILE), { enabled })
+  }
+
+  /** Pixel on macOS, millifraction on Windows, unless the profile file says otherwise. */
+  coordinateMode(): 'millifraction' | 'pixel' {
+    return this.millifractionValue ? 'millifraction' : 'pixel'
+  }
+
+  selectionEnabled(): boolean {
+    return this.selectionValue
+  }
+
+  setSelectionEnabled(enabled: boolean): void {
+    this.selectionValue = enabled
+    writeJson(join(this.dir, SELECTION_FILE), {
+      enabled,
+      translateTargetLanguage: this.selectionLanguage,
+    })
+  }
+
+  /** Missing file means the ball is on. `autoStart: false` is a separate patch switch. */
+  ballEnabled(): boolean {
+    return this.ballValue
+  }
+
+  setBallEnabled(enabled: boolean): void {
+    this.ballValue = enabled
+    writeJson(join(this.dir, BALL_FILE), { enabled })
+  }
+
+  avatarVersion(): number {
+    try {
+      return statSync(join(this.dir, AVATAR_FILE)).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+
+  readAvatar(): { bytes: Buffer; mime: AvatarMime } | undefined {
+    let bytes: Buffer
+    try {
+      bytes = readFileSync(join(this.dir, AVATAR_FILE))
+    } catch {
+      return undefined
+    }
+    const sniffed = sniffAvatarMime(bytes)
+    if (sniffed === undefined) return undefined
+    const declared = readAvatarMime(this.dir)
+    if (declared !== undefined && declared !== sniffed) return undefined
+    return { bytes, mime: declared ?? sniffed }
+  }
+
+  writeAvatar(bytes: Uint8Array, mime: AvatarMime): void {
+    writeFileSync(join(this.dir, AVATAR_FILE), bytes)
+    writeJson(join(this.dir, AVATAR_META_FILE), { mime })
+  }
+
+  restoreAvatar(): void {
+    for (const name of [AVATAR_FILE, AVATAR_META_FILE]) {
+      try {
+        unlinkSync(join(this.dir, name))
+      } catch (error) {
+        if (!isEnoent(error)) throw error
+      }
+    }
+  }
+
+  private writeModels(): void {
+    writeJson(join(this.dir, MODELS_FILE), {
+      overlay: serializeSelection(this.modelValue.overlay),
+      background: serializeSelection(this.modelValue.background),
+    })
+  }
+}
+
+export function sniffAvatarMime(bytes: Uint8Array): AvatarMime | undefined {
+  if (bytes.length >= 6
+    && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38
+    && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) {
+    return 'image/gif'
+  }
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) {
+    return 'image/png'
+  }
+  if (bytes.length >= 12
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return 'image/webp'
+  }
+  return undefined
+}
+
+export function defaultMillifraction(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'win32'
+}
+
+function readPermission(dir: string): PermissionPreset {
+  const preset = record(readJson(join(dir, PERMISSION_FILE)))?.preset
+  return isPermissionPreset(preset) ? preset : 'danger-full-access'
+}
+
+function readModels(dir: string): AgentModels {
+  const value = record(readJson(join(dir, MODELS_FILE)))
+  return {
+    overlay: parseSelection(value?.overlay) ?? DEFAULT_MODEL,
+    background: parseSelection(value?.background) ?? DEFAULT_MODEL,
+  }
+}
+
+function readMillifraction(dir: string): boolean {
+  const enabled = record(readJson(join(dir, MILLIFRACTION_FILE)))?.enabled
+  return typeof enabled === 'boolean' ? enabled : defaultMillifraction()
+}
+
+function readSelection(dir: string): { enabled: boolean; language: 'zh' | 'en' } {
+  const value = record(readJson(join(dir, SELECTION_FILE)))
+  const language = value?.translateTargetLanguage === 'en' ? 'en' : 'zh'
+  return {
+    enabled: typeof value?.enabled === 'boolean' ? value.enabled : true,
+    language,
+  }
+}
+
+function readBall(dir: string): boolean {
+  const enabled = record(readJson(join(dir, BALL_FILE)))?.enabled
+  return typeof enabled === 'boolean' ? enabled : true
+}
+
+function readAvatarMime(dir: string): AvatarMime | undefined {
+  const mime = record(readJson(join(dir, AVATAR_META_FILE)))?.mime
+  if (mime === 'image/gif' || mime === 'image/png' || mime === 'image/webp') return mime
+  return undefined
+}
+
+function parseSelection(value: unknown): AgentModelSelection | undefined {
+  const item = record(value)
+  if (item === undefined) return undefined
+  if (typeof item.provider !== 'string' || item.provider === '' || item.provider.length > 200) return undefined
+  if (typeof item.model !== 'string' || item.model === '' || item.model.length > 200) return undefined
+  if (item.reasoningEffort !== undefined && (typeof item.reasoningEffort !== 'string' || item.reasoningEffort === '' || item.reasoningEffort.length > 80)) {
+    return undefined
+  }
+  return {
+    provider: item.provider,
+    model: item.model,
+    ...typeof item.reasoningEffort === 'string' ? { reasoningEffort: item.reasoningEffort } : {},
+  }
+}
+
+function serializeSelection(selection: AgentModelSelection): AgentModelSelection {
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort },
+  }
+}
+
+function readJson(file: string): unknown {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+function writeJson(file: string, value: unknown): void {
+  writeFileSync(file, `${JSON.stringify(value, undefined, 2)}\n`)
+}
+
+function isEnoent(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT'
+}

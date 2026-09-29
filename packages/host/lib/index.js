@@ -1,13 +1,683 @@
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
+import { createReadStream, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
-import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
-import { createReadStream } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { pipeline } from "node:stream/promises";
+//#region src/tcc.ts
+/**
+* Screen Recording and Accessibility status for the process that actually calls screencapture and osascript.
+* The desktop host is the DeepSeek Harness executable. `dsh web` is the terminal's node process.
+*/
+const SETTINGS_URL = {
+	screen: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+	accessibility: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+};
+/** Remembers which panes were opened so a grant that needs a relaunch is visible. */
+var TccMonitor = class {
+	opened = /* @__PURE__ */ new Set();
+	probe;
+	probeFailed = false;
+	status() {
+		const appName = tccAppName();
+		if (process.platform !== "darwin") return {
+			applicable: false,
+			appName,
+			screen: "granted",
+			accessibility: "granted"
+		};
+		const probe = this.loadProbe();
+		return {
+			applicable: true,
+			appName,
+			screen: this.right("screen", probe?.screen() ?? false),
+			accessibility: this.right("accessibility", probe?.accessibility() ?? false)
+		};
+	}
+	async open(right) {
+		if (process.platform !== "darwin") return;
+		this.opened.add(right);
+		await openExternal(SETTINGS_URL[right]);
+	}
+	right(right, granted) {
+		if (granted) return "granted";
+		return this.opened.has(right) ? "needsRelaunch" : "missing";
+	}
+	loadProbe() {
+		if (this.probe) return this.probe;
+		if (this.probeFailed) return void 0;
+		try {
+			this.probe = loadMacProbe();
+			return this.probe;
+		} catch (error) {
+			this.probeFailed = true;
+			console.error(`dsh-orb: TCC probe unavailable: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+	}
+};
+function isDesktopHost() {
+	if (typeof process.env.DSH_DESKTOP_NODE_EXECUTABLE === "string" && process.env.DSH_DESKTOP_NODE_EXECUTABLE !== "") return true;
+	return process.execPath.includes("DeepSeek Harness");
+}
+function tccAppName() {
+	if (isDesktopHost()) return "DeepSeek Harness";
+	return `${process.env.LANG ?? ""}${process.env.LC_ALL ?? ""}`.toLowerCase().includes("zh") ? "终端" : "Terminal";
+}
+function isTccRight(value) {
+	return value === "screen" || value === "accessibility";
+}
+function loadMacProbe() {
+	const library = createRequire(import.meta.url)("koffi").load("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices");
+	const screen = library.func("bool CGPreflightScreenCaptureAccess()");
+	const accessibility = library.func("bool AXIsProcessTrusted()");
+	return {
+		screen: () => screen() === true,
+		accessibility: () => accessibility() === true
+	};
+}
+function openExternal(url) {
+	const command = process.platform === "win32" ? "cmd" : "open";
+	const args = process.platform === "win32" ? [
+		"/c",
+		"start",
+		"",
+		url
+	] : [url];
+	return new Promise((resolve, reject) => {
+		const child = spawn(command, args, {
+			stdio: "ignore",
+			windowsHide: true
+		});
+		child.once("error", reject);
+		child.once("exit", (code) => {
+			if (code === 0) resolve();
+			else reject(/* @__PURE__ */ new Error(`open exited ${code ?? "unknown"}`));
+		});
+	});
+}
+//#endregion
+//#region src/preferences.ts
+/**
+* Profile files the ball and the settings page share.
+* Names match the desktop fork so an existing profile keeps its choices.
+*/
+const PERMISSION_FILE = "orb-permission.json";
+const MODELS_FILE = "orb-agent-models.json";
+const MILLIFRACTION_FILE = "millifraction-coordinates.json";
+const SELECTION_FILE = "selection-toolbar.json";
+const BALL_FILE = "ball-enabled.json";
+const AVATAR_FILE = "orb-avatar";
+const AVATAR_META_FILE = "orb-avatar.json";
+const PERMISSION_PRESETS = [
+	"read-only",
+	"workspace-write",
+	"danger-full-access"
+];
+const DEFAULT_MODEL = {
+	provider: "deepseek-official",
+	model: "deepseek-flash",
+	reasoningEffort: "max"
+};
+/**
+* Active official profile directory.
+* Desktop and `dsh web` both provide `profileContext.dir`. The process directory is the fallback.
+*/
+function profileDirectory(ctx) {
+	const profile = ctx.get("profileContext");
+	if (typeof profile === "object" && profile !== null && "dir" in profile) {
+		const dir = profile.dir;
+		if (typeof dir === "string" && dir !== "") return dir;
+	}
+	return process.cwd();
+}
+function isPermissionPreset(value) {
+	return typeof value === "string" && PERMISSION_PRESETS.includes(value);
+}
+function isAgentModelSelection(value) {
+	return parseSelection(value) !== void 0;
+}
+/** In-memory view of the profile files. Writes update the cache and the disk together. */
+var ProfileStore = class {
+	dir;
+	permissionValue;
+	modelValue;
+	millifractionValue;
+	selectionValue;
+	selectionLanguage;
+	ballValue;
+	constructor(dir) {
+		this.dir = dir;
+		this.permissionValue = readPermission(dir);
+		this.modelValue = readModels(dir);
+		this.millifractionValue = readMillifraction(dir);
+		const selection = readSelection(dir);
+		this.selectionValue = selection.enabled;
+		this.selectionLanguage = selection.language;
+		this.ballValue = readBall(dir);
+	}
+	permission() {
+		return this.permissionValue;
+	}
+	setPermission(preset) {
+		this.permissionValue = preset;
+		writeJson(join(this.dir, PERMISSION_FILE), { preset });
+	}
+	models() {
+		return this.modelValue;
+	}
+	setOverlay(selection) {
+		this.modelValue = {
+			overlay: selection,
+			background: this.modelValue.background
+		};
+		this.writeModels();
+	}
+	setBackground(selection) {
+		this.modelValue = {
+			overlay: this.modelValue.overlay,
+			background: selection
+		};
+		this.writeModels();
+	}
+	millifractionEnabled() {
+		return this.millifractionValue;
+	}
+	setMillifractionEnabled(enabled) {
+		this.millifractionValue = enabled;
+		writeJson(join(this.dir, MILLIFRACTION_FILE), { enabled });
+	}
+	/** Pixel on macOS, millifraction on Windows, unless the profile file says otherwise. */
+	coordinateMode() {
+		return this.millifractionValue ? "millifraction" : "pixel";
+	}
+	selectionEnabled() {
+		return this.selectionValue;
+	}
+	setSelectionEnabled(enabled) {
+		this.selectionValue = enabled;
+		writeJson(join(this.dir, SELECTION_FILE), {
+			enabled,
+			translateTargetLanguage: this.selectionLanguage
+		});
+	}
+	/** Missing file means the ball is on. `autoStart: false` is a separate patch switch. */
+	ballEnabled() {
+		return this.ballValue;
+	}
+	setBallEnabled(enabled) {
+		this.ballValue = enabled;
+		writeJson(join(this.dir, BALL_FILE), { enabled });
+	}
+	avatarVersion() {
+		try {
+			return statSync(join(this.dir, AVATAR_FILE)).mtimeMs;
+		} catch {
+			return 0;
+		}
+	}
+	readAvatar() {
+		let bytes;
+		try {
+			bytes = readFileSync(join(this.dir, AVATAR_FILE));
+		} catch {
+			return;
+		}
+		const sniffed = sniffAvatarMime(bytes);
+		if (sniffed === void 0) return void 0;
+		const declared = readAvatarMime(this.dir);
+		if (declared !== void 0 && declared !== sniffed) return void 0;
+		return {
+			bytes,
+			mime: declared ?? sniffed
+		};
+	}
+	writeAvatar(bytes, mime) {
+		writeFileSync(join(this.dir, AVATAR_FILE), bytes);
+		writeJson(join(this.dir, AVATAR_META_FILE), { mime });
+	}
+	restoreAvatar() {
+		for (const name of [AVATAR_FILE, AVATAR_META_FILE]) try {
+			unlinkSync(join(this.dir, name));
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	writeModels() {
+		writeJson(join(this.dir, MODELS_FILE), {
+			overlay: serializeSelection(this.modelValue.overlay),
+			background: serializeSelection(this.modelValue.background)
+		});
+	}
+};
+function sniffAvatarMime(bytes) {
+	if (bytes.length >= 6 && bytes[0] === 71 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 56 && (bytes[4] === 55 || bytes[4] === 57) && bytes[5] === 97) return "image/gif";
+	if (bytes.length >= 8 && bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71 && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10) return "image/png";
+	if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80) return "image/webp";
+}
+function defaultMillifraction(platform = process.platform) {
+	return platform === "win32";
+}
+function readPermission(dir) {
+	const preset = record(readJson$1(join(dir, PERMISSION_FILE)))?.preset;
+	return isPermissionPreset(preset) ? preset : "danger-full-access";
+}
+function readModels(dir) {
+	const value = record(readJson$1(join(dir, MODELS_FILE)));
+	return {
+		overlay: parseSelection(value?.overlay) ?? DEFAULT_MODEL,
+		background: parseSelection(value?.background) ?? DEFAULT_MODEL
+	};
+}
+function readMillifraction(dir) {
+	const enabled = record(readJson$1(join(dir, MILLIFRACTION_FILE)))?.enabled;
+	return typeof enabled === "boolean" ? enabled : defaultMillifraction();
+}
+function readSelection(dir) {
+	const value = record(readJson$1(join(dir, SELECTION_FILE)));
+	const language = value?.translateTargetLanguage === "en" ? "en" : "zh";
+	return {
+		enabled: typeof value?.enabled === "boolean" ? value.enabled : true,
+		language
+	};
+}
+function readBall(dir) {
+	const enabled = record(readJson$1(join(dir, BALL_FILE)))?.enabled;
+	return typeof enabled === "boolean" ? enabled : true;
+}
+function readAvatarMime(dir) {
+	const mime = record(readJson$1(join(dir, AVATAR_META_FILE)))?.mime;
+	if (mime === "image/gif" || mime === "image/png" || mime === "image/webp") return mime;
+}
+function parseSelection(value) {
+	const item = record(value);
+	if (item === void 0) return void 0;
+	if (typeof item.provider !== "string" || item.provider === "" || item.provider.length > 200) return void 0;
+	if (typeof item.model !== "string" || item.model === "" || item.model.length > 200) return void 0;
+	if (item.reasoningEffort !== void 0 && (typeof item.reasoningEffort !== "string" || item.reasoningEffort === "" || item.reasoningEffort.length > 80)) return;
+	return {
+		provider: item.provider,
+		model: item.model,
+		...typeof item.reasoningEffort === "string" ? { reasoningEffort: item.reasoningEffort } : {}
+	};
+}
+function serializeSelection(selection) {
+	return {
+		provider: selection.provider,
+		model: selection.model,
+		...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort }
+	};
+}
+function readJson$1(file) {
+	try {
+		return JSON.parse(readFileSync(file, "utf8"));
+	} catch {
+		return;
+	}
+}
+function record(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function writeJson(file, value) {
+	writeFileSync(file, `${JSON.stringify(value, void 0, 2)}\n`);
+}
+function isEnoent(error) {
+	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+//#endregion
+//#region src/catalog.ts
+/** Accept the official `modelCatalog()` object, or an empty catalog when it is missing. */
+function normalizeCatalog(value) {
+	const groups = asRecord$2(value)?.groups;
+	if (!Array.isArray(groups)) return { groups: [] };
+	const normalized = [];
+	for (const group of groups) {
+		const record = asRecord$2(group);
+		if (record === void 0 || typeof record.id !== "string" || typeof record.name !== "string") continue;
+		if (!Array.isArray(record.models)) continue;
+		const models = [];
+		for (const model of record.models) {
+			const item = asRecord$2(model);
+			if (item === void 0 || typeof item.id !== "string" || typeof item.name !== "string") continue;
+			const reasoning = reasoningOf(item.reasoning);
+			models.push({
+				id: item.id,
+				name: item.name,
+				...reasoning === void 0 ? {} : { reasoning }
+			});
+		}
+		if (models.length > 0) normalized.push({
+			id: record.id,
+			name: record.name,
+			models
+		});
+	}
+	return { groups: normalized };
+}
+function reasoningOf(value) {
+	const record = asRecord$2(value);
+	if (record === void 0 || !Array.isArray(record.efforts)) return void 0;
+	const efforts = [];
+	for (const effort of record.efforts) {
+		const item = asRecord$2(effort);
+		if (item === void 0 || typeof item.id !== "string" || typeof item.name !== "string") continue;
+		efforts.push({
+			id: item.id,
+			name: item.name
+		});
+	}
+	if (efforts.length === 0) return void 0;
+	const defaultEffort = typeof record.defaultEffort === "string" && record.defaultEffort !== "" ? record.defaultEffort : void 0;
+	return {
+		efforts,
+		...defaultEffort === void 0 ? {} : { defaultEffort }
+	};
+}
+function asRecord$2(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+//#endregion
+//#region src/routes.ts
+/**
+* Settings routes on the official web port.
+* The main window calls these with a relative fetch, so the existing login cookie is enough.
+* The helper may read only the avatar, and only with its socket token.
+*/
+const require$1 = createRequire(import.meta.url);
+const PREFIX = "/.dsh-orb";
+const HELPER_HEADER = "x-dsh-orb-helper";
+/** Mount `/.dsh-orb` and return the disposer. */
+function registerOrbRoutes(deps) {
+	return deps.ctx.webServer.register({
+		kind: "prefix",
+		path: PREFIX,
+		handler: (req, res) => handle(deps, req, res)
+	});
+}
+function orbSupported(platform = process.platform) {
+	return platform === "darwin" || platform === "win32";
+}
+async function handle(deps, req, res) {
+	const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+	if (!(path === `${PREFIX}/avatar` && req.method === "GET" && helperTokenOk(deps, req))) {
+		const rejection = rejectionStatus(deps.ctx, req);
+		if (rejection !== void 0) {
+			res.writeHead(rejection);
+			res.end();
+			return;
+		}
+	}
+	const method = req.method ?? "GET";
+	if (method === "GET" && path === `${PREFIX}/settings`) {
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "GET" && path === `${PREFIX}/models`) {
+		sendJson(res, 200, await catalog(deps));
+		return;
+	}
+	if (method === "GET" && path === `${PREFIX}/tcc`) {
+		sendJson(res, 200, deps.tcc.status());
+		return;
+	}
+	if ((method === "GET" || method === "HEAD") && path === `${PREFIX}/avatar`) {
+		await sendAvatar(deps.store, method, res);
+		return;
+	}
+	if (!orbSupported()) {
+		sendJson(res, 403, { error: "unsupported" });
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/overlay-model`) {
+		const selection = selectionFrom(await readJson(req));
+		if (selection === void 0) {
+			sendJson(res, 400, { error: "invalid-model" });
+			return;
+		}
+		await deps.control.setOverlayModel(selection);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/background-model`) {
+		const selection = selectionFrom(await readJson(req));
+		if (selection === void 0) {
+			sendJson(res, 400, { error: "invalid-model" });
+			return;
+		}
+		await deps.control.setBackgroundModel(selection);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/selection`) {
+		const enabled = booleanField(await readJson(req));
+		if (enabled === void 0) {
+			sendJson(res, 400, { error: "invalid-selection" });
+			return;
+		}
+		await deps.control.setSelectionEnabled(enabled);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/millifraction`) {
+		const enabled = booleanField(await readJson(req));
+		if (enabled === void 0) {
+			sendJson(res, 400, { error: "invalid-millifraction" });
+			return;
+		}
+		await deps.control.setMillifractionEnabled(enabled);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/ball`) {
+		const enabled = booleanField(await readJson(req));
+		if (enabled === void 0) {
+			sendJson(res, 400, { error: "invalid-ball" });
+			return;
+		}
+		await deps.control.setBallEnabled(enabled);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/avatar`) {
+		const bytes = await readBody(req, 2097153).catch((error) => {
+			if (error instanceof Error && error.message === "too-large") return void 0;
+			throw error;
+		});
+		if (bytes === void 0 || bytes.length > 2097152) {
+			sendJson(res, 413, { error: "too-large" });
+			return;
+		}
+		const mime = sniffAvatarMime(bytes);
+		if (mime === void 0) {
+			sendJson(res, 400, { error: "invalid-type" });
+			return;
+		}
+		deps.store.writeAvatar(bytes, mime);
+		await deps.control.publishChrome();
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/avatar/restore`) {
+		deps.store.restoreAvatar();
+		await deps.control.publishChrome();
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	if (method === "POST" && path === `${PREFIX}/tcc`) {
+		const right = asRecord$1(await readJson(req))?.right;
+		if (!isTccRight(right)) {
+			sendJson(res, 400, { error: "invalid-tcc" });
+			return;
+		}
+		await deps.tcc.open(right);
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
+	res.writeHead(404);
+	res.end();
+}
+async function snapshot(deps) {
+	const models = deps.store.models();
+	const version = Math.trunc(deps.store.avatarVersion());
+	return {
+		supported: orbSupported(),
+		ballEnabled: deps.store.ballEnabled(),
+		avatarUrl: `${PREFIX}/avatar?v=${version}`,
+		overlay: models.overlay,
+		background: models.background,
+		selectionEnabled: deps.store.selectionEnabled(),
+		millifractionEnabled: deps.store.millifractionEnabled(),
+		tcc: deps.tcc.status()
+	};
+}
+async function catalog(deps) {
+	try {
+		return normalizeCatalog(await deps.ctx.sessionController.modelCatalog());
+	} catch (error) {
+		console.error(`dsh-orb: model catalog failed: ${error instanceof Error ? error.message : String(error)}`);
+		return { groups: [] };
+	}
+}
+async function sendAvatar(store, method, res) {
+	const custom = store.readAvatar();
+	const mime = custom?.mime ?? "image/gif";
+	let body;
+	if (custom) body = custom.bytes;
+	else try {
+		body = await readFile(defaultAvatarPath());
+	} catch {
+		res.writeHead(404);
+		res.end();
+		return;
+	}
+	res.writeHead(200, {
+		"content-type": mime,
+		"cache-control": "no-store",
+		"content-length": body.length
+	});
+	res.end(method === "HEAD" ? void 0 : body);
+}
+function defaultAvatarPath() {
+	const pkg = require$1.resolve("@dsh-orb/helper/package.json");
+	return join(dirname(pkg), "assets", "deepseek-avatar-square.gif");
+}
+function helperTokenOk(deps, req) {
+	const header = req.headers[HELPER_HEADER];
+	return typeof header === "string" && deps.control.helperAuthorized(header);
+}
+function tokensMatch(given, expected) {
+	const left = Buffer.from(given);
+	const right = Buffer.from(expected);
+	return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
+}
+function rejectionStatus(ctx, req) {
+	if (typeof ctx.connection.admit === "function") {
+		const admitted = ctx.connection.admit(req);
+		if (typeof admitted === "object" && admitted !== null && "rejection" in admitted && typeof admitted.rejection === "number") return admitted.rejection;
+		return;
+	}
+	if (typeof ctx.connection.isAuthenticated === "function") return ctx.connection.isAuthenticated(req) ? void 0 : 401;
+	return 401;
+}
+function selectionFrom(value) {
+	return isAgentModelSelection(value) ? value : void 0;
+}
+function booleanField(value) {
+	const enabled = asRecord$1(value)?.enabled;
+	return typeof enabled === "boolean" ? enabled : void 0;
+}
+function sendJson(res, status, body) {
+	const payload = JSON.stringify(body);
+	res.writeHead(status, {
+		"content-type": "application/json; charset=utf-8",
+		"cache-control": "no-store",
+		"content-length": Buffer.byteLength(payload)
+	});
+	res.end(payload);
+}
+async function readJson(req) {
+	const bytes = await readBody(req, 65536);
+	if (bytes.length === 0) return void 0;
+	return JSON.parse(bytes.toString("utf8"));
+}
+function readBody(req, limit) {
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		let size = 0;
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > limit) {
+				reject(Object.assign(/* @__PURE__ */ new Error("too-large"), { status: 413 }));
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => resolve(Buffer.concat(chunks)));
+		req.on("error", reject);
+	});
+}
+function asRecord$1(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+//#endregion
+//#region src/services.ts
+/**
+* Optional services Computer Use already looks up, plus the Access preset pinned on orb sessions.
+*/
+/**
+* Publish the two model/coordinate services for the life of the plugin.
+* @param ctx - host context. `provide` is called once.
+* @param store - profile preferences.
+*/
+function installOrbServices(ctx, store) {
+	ctx.provide("orbCodeAgentModel", { currentSelection: () => store.models().background });
+	ctx.provide("orbCoordinateMode", { currentMode: () => store.coordinateMode() });
+}
+/**
+* Pin the stored Access preset on Computer Use and background sessions under `dsh_orb`.
+* @returns a disposer for the create listener.
+*/
+function watchOrbPermissions(ctx, store) {
+	const dispose = ctx.on("session/created", (session) => {
+		pinSession(ctx, session, store.permission());
+	});
+	return typeof dispose === "function" ? dispose : () => {};
+}
+/** Pin one already-open session when the chip or a reopen asks for it. */
+function pinSessionId(ctx, sessionId, preset) {
+	const session = ctx.get("sessions")?.get?.(sessionId);
+	if (session) pinSession(ctx, session, preset);
+}
+function pinSession(ctx, session, preset) {
+	if (!isOrbSession(session)) return;
+	const presets = ctx.get("permissionPresets");
+	if (typeof presets?.set !== "function") return;
+	if (!isPermissionPreset(preset)) return;
+	try {
+		presets.set(session, preset);
+	} catch (error) {
+		console.error(`dsh-orb: permission preset failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+function isOrbSession(session) {
+	const preset = session.header?.agentPreset;
+	const cwd = session.header?.cwd;
+	if (preset !== "computer-use" && preset !== "standard" || cwd === void 0) return false;
+	return isOrbWorkspace(cwd, dshHomePath("dsh_orb"));
+}
+function isOrbWorkspace(cwd, orbCwd) {
+	const resolved = resolve(cwd);
+	const orb = resolve(orbCwd);
+	if (resolved === orb) return true;
+	const rel = relative(orb, resolved);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+//#endregion
 //#region src/electron-runtime.ts
 /**
 * Locate the generic Electron binary used to open the ball.
@@ -185,6 +855,76 @@ async function exists(path) {
 	}
 }
 //#endregion
+//#region src/open-main.ts
+/**
+* Focus the official desktop window, or open the local web page.
+* The credentialed page address is never written to the log.
+*/
+/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
+function mainWindowTarget(ctx, desktop = isDesktopHost()) {
+	if (desktop) return "dsh://open";
+	return localPage(ctx);
+}
+/** Command used to focus that window. The target is never logged. */
+function openCommand(target, platform = process.platform) {
+	if (platform === "win32") return {
+		command: "cmd",
+		args: [
+			"/c",
+			"start",
+			"",
+			target
+		]
+	};
+	return {
+		command: "open",
+		args: [target]
+	};
+}
+/** Desktop uses the app's `dsh://open` protocol. `dsh web` opens the loopback page. */
+async function openMainWindow(ctx) {
+	const target = mainWindowTarget(ctx);
+	if (target === void 0) return;
+	await spawnOpen(target);
+}
+function localPage(ctx) {
+	let url;
+	try {
+		url = ctx.connection.authenticatedUrl(`http://127.0.0.1:${ctx.webServer.port}`);
+	} catch {
+		console.error("dsh-orb: main window URL is unavailable");
+		return;
+	}
+	try {
+		const hostname = new URL(url).hostname;
+		if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") {
+			console.error("dsh-orb: main window URL is not loopback");
+			return;
+		}
+	} catch {
+		console.error("dsh-orb: main window URL is unavailable");
+		return;
+	}
+	return url;
+}
+function spawnOpen(target) {
+	const { command, args } = openCommand(target);
+	return new Promise((resolve) => {
+		const child = spawn(command, args, {
+			stdio: "ignore",
+			windowsHide: true
+		});
+		child.once("error", () => {
+			console.error("dsh-orb: could not open the main window");
+			resolve();
+		});
+		child.once("exit", (code) => {
+			if (code !== 0) console.error("dsh-orb: could not open the main window");
+			resolve();
+		});
+	});
+}
+//#endregion
 //#region src/orb.ts
 /**
 * NDJSON control plane for the ball, plus the Computer Use session it talks to.
@@ -194,6 +934,7 @@ const require = createRequire(import.meta.url);
 /** One host lifetime of the ball: socket, helper process, and one Computer Use session. */
 var OrbRuntime = class {
 	ctx;
+	store;
 	token = randomBytes(32).toString("hex");
 	sessionFile = dshHomePath("dsh-orb", "floating-session.json");
 	server;
@@ -208,7 +949,12 @@ var OrbRuntime = class {
 	child;
 	binary = "";
 	failures = 0;
-	stopped = false;
+	halted = false;
+	generation = 0;
+	replaying = false;
+	workspaceTask;
+	retry;
+	opening = false;
 	sessionId;
 	sessionError;
 	creating;
@@ -216,14 +962,32 @@ var OrbRuntime = class {
 	missingLogged = false;
 	timer;
 	giveUp;
-	constructor(ctx) {
+	constructor(ctx, store) {
 		this.ctx = ctx;
+		this.store = store;
 	}
-	/** Open the socket, prepare a session, and spawn the helper. */
+	/** Open the socket, prepare a session, and spawn the helper. A halted ball can start again. */
 	async start() {
-		if (this.stopped) return;
+		if (process.platform === "linux") return;
+		if (this.opening || !this.halted && this.server) return;
+		this.opening = true;
+		this.halted = false;
+		this.failures = 0;
+		this.generation += 1;
+		const generation = this.generation;
+		try {
+			await this.begin(generation);
+		} finally {
+			this.opening = false;
+		}
+	}
+	async begin(generation) {
 		await this.listen();
-		if (this.stopped) return;
+		if (this.halted || generation !== this.generation) {
+			this.server?.close();
+			this.server = void 0;
+			return;
+		}
 		console.error(`dsh-orb: helper socket 127.0.0.1:${this.port}`);
 		const sessionTask = this.ensureSession().catch((error) => {
 			this.sessionError = error instanceof Error ? error.message : String(error);
@@ -236,18 +1000,34 @@ var OrbRuntime = class {
 			return;
 		}
 		await sessionTask;
-		if (this.stopped) return;
+		if (this.halted || generation !== this.generation) return;
 		await mkdir(dshHomePath("dsh-orb", "helper-data"), { recursive: true });
 		this.launch();
 	}
-	/** Stop the helper and the socket. A later helper exit is not a crash. */
-	stop() {
-		this.stopped = true;
+	/**
+	* Open the control socket without spawning the helper.
+	* {@link start} listens and then launches the helper process.
+	*/
+	async bind() {
+		if (!this.server) await this.listen();
+		return {
+			port: this.port,
+			token: this.token
+		};
+	}
+	/** Stop the helper and the socket. Settings can call {@link start} again. */
+	halt() {
+		this.generation += 1;
+		this.halted = true;
+		if (this.retry) clearTimeout(this.retry);
+		this.retry = void 0;
 		this.stopWatch();
 		this.failQuestion("ask_user_question was aborted before the user answered", "ASK_ABORTED");
 		this.server?.close();
+		this.server = void 0;
 		for (const socket of this.sockets) socket.destroy();
 		this.sockets.clear();
+		this.buffers.clear();
 		this.killChild();
 	}
 	/** Claim questions for this orb session. Register this while the plugin fiber is active. */
@@ -310,6 +1090,7 @@ var OrbRuntime = class {
 				if (isPrompt(message)) this.onPrompt(message.text);
 				else if (isQuestionAnswer(message)) this.onQuestionAnswer(message.id, message.answers);
 				else if (isQuestionCancel(message)) this.onQuestionCancel(message.id);
+				else this.onControl(message);
 			}
 		});
 		socket.on("close", () => {
@@ -335,7 +1116,11 @@ var OrbRuntime = class {
 			type: "session",
 			sessionId: this.sessionId
 		});
-		for (const key of this.blockOrder) {
+		if (this.blockOrder.length === 0 && this.sessionId) {
+			this.replaying = true;
+			this.drain();
+			this.replaying = false;
+		} else for (const key of this.blockOrder) {
 			const block = this.blocks.get(key);
 			if (block) this.send(socket, block);
 		}
@@ -344,6 +1129,7 @@ var OrbRuntime = class {
 			running: this.turnRunning
 		});
 		if (this.pending) this.send(socket, this.questionPayload(this.pending.id));
+		this.publishChrome();
 	}
 	async onPrompt(text) {
 		const trimmed = text.trim();
@@ -393,9 +1179,7 @@ var OrbRuntime = class {
 		return this.creating;
 	}
 	async createSession() {
-		const workspace = dshHomePath("dsh_orb");
-		await mkdir(workspace, { recursive: true });
-		const workspaceId = (await this.ctx.workspaceController.create({ path: workspace })).workspace.workspaceId;
+		const workspaceId = await this.workspaceId();
 		const saved = await readSavedSession(this.sessionFile);
 		try {
 			const session = await this.ctx.sessionController.create({
@@ -403,7 +1187,7 @@ var OrbRuntime = class {
 				agentPreset: "computer-use",
 				...saved ? { sessionId: saved } : {}
 			});
-			return this.remember(session.sessionId);
+			return this.adopt(session.sessionId);
 		} catch (error) {
 			if (!saved) throw error;
 			console.error("dsh-orb: saved session cannot be opened; creating a new one");
@@ -412,8 +1196,26 @@ var OrbRuntime = class {
 				workspaceId,
 				agentPreset: "computer-use"
 			});
-			return this.remember(session.sessionId);
+			return this.adopt(session.sessionId);
 		}
+	}
+	workspaceId() {
+		this.workspaceTask ??= this.createWorkspace().catch((error) => {
+			this.workspaceTask = void 0;
+			throw error;
+		});
+		return this.workspaceTask;
+	}
+	async createWorkspace() {
+		const workspace = dshHomePath("dsh_orb");
+		await mkdir(workspace, { recursive: true });
+		return (await this.ctx.workspaceController.create({ path: workspace })).workspace.workspaceId;
+	}
+	async adopt(sessionId) {
+		const id = await this.remember(sessionId);
+		await this.applyOverlayQuiet(id);
+		pinSessionId(this.ctx, id, this.store.permission());
+		return id;
 	}
 	async remember(sessionId) {
 		this.sessionId = sessionId;
@@ -481,6 +1283,13 @@ var OrbRuntime = class {
 		}
 	}
 	consume(type, data, seq) {
+		if (type === "user/message") {
+			if (!this.replaying) return;
+			const text = userText(data);
+			if (!text.trim()) return;
+			this.block(`user:${seq}`, "user", text, false, "set");
+			return;
+		}
 		if (type === "assistant/chunk") {
 			this.onChunk(data);
 			return;
@@ -712,12 +1521,14 @@ var OrbRuntime = class {
 		}
 	}
 	launch() {
-		if (this.stopped || !this.binary) return;
+		if (this.halted || !this.binary) return;
+		const generation = this.generation;
 		const userData = dshHomePath("dsh-orb", "helper-data");
 		const env = {
 			...process.env,
 			DSH_ORB_TOKEN: this.token,
-			DSH_ORB_SOCKET: `127.0.0.1:${this.port}`
+			DSH_ORB_SOCKET: `127.0.0.1:${this.port}`,
+			DSH_ORB_WEB_PORT: String(this.ctx.webServer.port)
 		};
 		delete env.ELECTRON_RUN_AS_NODE;
 		const child = spawn(this.binary, [`--user-data-dir=${userData}`, helperMain()], {
@@ -734,7 +1545,7 @@ var OrbRuntime = class {
 		const token = this.token;
 		const log = (chunk) => {
 			for (const line of chunk.split("\n")) {
-				if (!line.trim() || line.includes(token)) continue;
+				if (!line.trim() || line.includes(token) || /token=|api[_-]?key|authorization/i.test(line)) continue;
 				console.error(`dsh-orb helper: ${line}`);
 			}
 		};
@@ -744,7 +1555,7 @@ var OrbRuntime = class {
 		child.stderr?.on("data", log);
 		let settled = false;
 		const fail = (reason) => {
-			if (settled || this.stopped) return;
+			if (settled || this.halted || generation !== this.generation) return;
 			settled = true;
 			if (this.child === child) this.child = void 0;
 			this.failures += 1;
@@ -753,7 +1564,8 @@ var OrbRuntime = class {
 				return;
 			}
 			console.error(`dsh-orb: helper exited (${reason}); retry ${this.failures}`);
-			setTimeout(() => this.launch(), 500).unref();
+			this.retry = setTimeout(() => this.launch(), 500);
+			this.retry.unref();
 		};
 		child.once("error", (error) => fail(error.message));
 		child.once("exit", (code, signal) => fail(String(code ?? signal)));
@@ -769,6 +1581,225 @@ var OrbRuntime = class {
 				process.kill(pid, "SIGKILL");
 			} catch {}
 		}, 1e3).unref();
+	}
+	/** True when the helper presented this socket token. */
+	helperAuthorized(token) {
+		return tokensMatch(token, this.token);
+	}
+	/** Push permission, both models, the catalog, and the avatar version to the ball. */
+	async publishChrome() {
+		const models = this.store.models();
+		let catalog = { groups: [] };
+		try {
+			catalog = normalizeCatalog(await this.ctx.sessionController.modelCatalog());
+		} catch (error) {
+			console.error(`dsh-orb: model catalog failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		this.broadcast({
+			type: "permission",
+			preset: this.store.permission()
+		});
+		this.broadcast({
+			type: "chrome",
+			overlay: models.overlay,
+			background: models.background,
+			selectionEnabled: this.store.selectionEnabled(),
+			millifractionEnabled: this.store.millifractionEnabled(),
+			catalog
+		});
+		this.broadcast({
+			type: "avatar",
+			version: Math.trunc(this.store.avatarVersion())
+		});
+	}
+	async setOverlayModel(selection) {
+		this.store.setOverlay(selection);
+		if (this.sessionId) await this.applyOverlayQuiet(this.sessionId);
+		await this.publishChrome();
+	}
+	async setBackgroundModel(selection) {
+		this.store.setBackground(selection);
+		await this.publishChrome();
+	}
+	async setSelectionEnabled(enabled) {
+		this.store.setSelectionEnabled(enabled);
+		await this.publishChrome();
+	}
+	async setMillifractionEnabled(enabled) {
+		if (this.store.millifractionEnabled() === enabled) return;
+		this.store.setMillifractionEnabled(enabled);
+		if (this.sessionId) await this.newSession();
+		else await this.publishChrome();
+	}
+	async setBallEnabled(enabled) {
+		this.store.setBallEnabled(enabled);
+		if (process.platform === "linux") return;
+		if (enabled) await this.start();
+		else this.halt();
+	}
+	onControl(message) {
+		const record = asRecord(message);
+		if (!record || typeof record.type !== "string") return;
+		if (record.type === "history") {
+			this.sendHistory();
+			return;
+		}
+		if (record.type === "open" && typeof record.sessionId === "string") {
+			this.openSession(record.sessionId);
+			return;
+		}
+		if (record.type === "new") {
+			this.newSession();
+			return;
+		}
+		if (record.type === "permission" && isPermissionPreset(record.preset)) {
+			this.setPermission(record.preset);
+			return;
+		}
+		if (record.type === "stop") {
+			this.stopTurn();
+			return;
+		}
+		if (record.type === "menu") {
+			this.publishChrome();
+			return;
+		}
+		if (record.type === "set-overlay" && isAgentModelSelection(record.selection)) {
+			this.setOverlayModel(record.selection);
+			return;
+		}
+		if (record.type === "set-background" && isAgentModelSelection(record.selection)) {
+			this.setBackgroundModel(record.selection);
+			return;
+		}
+		if (record.type === "set-selection" && typeof record.enabled === "boolean") {
+			this.setSelectionEnabled(record.enabled);
+			return;
+		}
+		if (record.type === "set-millifraction" && typeof record.enabled === "boolean") {
+			this.setMillifractionEnabled(record.enabled);
+			return;
+		}
+		if (record.type === "disable") {
+			this.setBallEnabled(false);
+			return;
+		}
+		if (record.type === "open-main") this.openMain();
+	}
+	async setPermission(preset) {
+		this.store.setPermission(preset);
+		if (this.sessionId) pinSessionId(this.ctx, this.sessionId, preset);
+		await this.publishChrome();
+	}
+	async stopTurn() {
+		const sessionId = this.sessionId;
+		if (!sessionId || !this.turnRunning) return;
+		try {
+			await this.ctx.sessionController.cancel({ sessionId });
+		} catch (error) {
+			console.error(`dsh-orb: cancel failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		this.drain();
+		this.finishTurn();
+	}
+	async newSession() {
+		this.failQuestion("ask_user_question was aborted before the user answered", "ASK_ABORTED");
+		const session = await this.ctx.sessionController.create({
+			workspaceId: await this.workspaceId(),
+			agentPreset: "computer-use"
+		});
+		await this.adopt(session.sessionId);
+		this.resetTranscript();
+		await this.publishChrome();
+	}
+	async openSession(sessionId) {
+		if (!sessionId.startsWith("session-") || sessionId.length > 80) return;
+		const row = (await this.historyRecords()).find((item) => item.sessionId === sessionId);
+		if (!row) return;
+		this.failQuestion("ask_user_question was aborted before the user answered", "ASK_ABORTED");
+		const session = await this.ctx.sessionController.create({
+			workspaceId: await this.workspaceId(),
+			agentPreset: "computer-use",
+			sessionId
+		});
+		await this.adopt(session.sessionId);
+		this.resetTranscript();
+		this.replaying = true;
+		this.drain();
+		this.replaying = false;
+		if (row.running) {
+			this.turnRunning = true;
+			this.broadcast({
+				type: "turn",
+				running: true
+			});
+			this.watch();
+		}
+	}
+	async sendHistory() {
+		const current = this.sessionId;
+		const items = (await this.historyRecords()).slice(0, 40).map((row) => ({
+			sessionId: row.sessionId,
+			title: row.title,
+			current: row.sessionId === current
+		}));
+		this.broadcast({
+			type: "history",
+			items
+		});
+	}
+	async historyRecords() {
+		try {
+			const listed = await this.ctx.sessionController.list({}, AbortSignal.timeout(15e3));
+			const rows = Array.isArray(listed) ? listed : listed.items ?? [];
+			const orb = resolve(dshHomePath("dsh_orb"));
+			const items = [];
+			for (const row of rows) {
+				const record = asRecord(row);
+				if (!record || !isHistoryRow(record, orb) || typeof record.sessionId !== "string") continue;
+				const title = projection(record, "title");
+				items.push({
+					sessionId: record.sessionId,
+					title: typeof title === "string" ? title.slice(0, 200) : "",
+					running: record.running === true
+				});
+			}
+			return items;
+		} catch (error) {
+			console.error(`dsh-orb: history failed: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	}
+	resetTranscript() {
+		this.blocks.clear();
+		this.blockOrder.length = 0;
+		this.watermark = 0;
+		this.turnRunning = false;
+		this.stopWatch();
+		this.broadcast({ type: "reset" });
+		this.broadcast({
+			type: "turn",
+			running: false
+		});
+	}
+	async applyOverlayQuiet(sessionId) {
+		const selection = this.store.models().overlay;
+		try {
+			await this.ctx.sessionController.selectModel({
+				sessionId,
+				provider: selection.provider,
+				model: selection.model,
+				...selection.reasoningEffort === void 0 ? {} : { reasoningEffort: selection.reasoningEffort },
+				saveAsDefault: false
+			});
+		} catch (error) {
+			console.error(`dsh-orb: overlay model failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	openMain() {
+		openMainWindow(this.ctx).catch(() => {
+			console.error("dsh-orb: could not open the main window");
+		});
 	}
 };
 function helperMain() {
@@ -800,6 +1831,32 @@ function isQuestionCancel(message) {
 	if (typeof message !== "object" || message === null) return false;
 	const record = message;
 	return record.type === "question-cancel" && typeof record.id === "string";
+}
+function isHistoryRow(record, orb) {
+	if (record.origin === "subagent") return false;
+	if (typeof record.cwd !== "string" || resolve(record.cwd) !== orb) return false;
+	const preset = projection(record, "agentPreset");
+	return preset === void 0 || preset === "computer-use";
+}
+function projection(record, key) {
+	return asRecord(asRecord(record.projections)?.values)?.[key];
+}
+function userText(data) {
+	const record = asRecord(data);
+	if (!record) return "";
+	const source = asRecord(record.source);
+	if (source && source.kind !== void 0 && source.kind !== "user") return "";
+	return textOf(record.content);
+}
+function textOf(content) {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	const parts = [];
+	for (const part of content) {
+		const block = asRecord(part);
+		if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+	}
+	return parts.join("\n");
 }
 function asRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
@@ -886,7 +1943,7 @@ function clip(text, max) {
 //#region src/index.ts
 /**
 * Host-side Orb plugin.
-* The ball is a separate Electron process. This plugin owns the socket and the Computer Use session.
+* The ball is a separate Electron process. This plugin owns the socket, the preferences, and the Computer Use session.
 */
 /** Cordis plugin name. */
 const name = "orb-host";
@@ -899,22 +1956,35 @@ const inject = [
 	"sessions"
 ];
 /**
-* Log the web port, then start the ball unless this is Linux or autoStart is off.
+* Register preferences, Computer Use services, and settings routes, then start the ball.
+* Linux never starts the helper. `autoStart: false` and `ball-enabled.json` leave Computer Use in the main window.
 * @param ctx - host services named in {@link inject}.
-* @param config - patch config. `autoStart: false` leaves Computer Use in the main window only.
+* @param config - patch config. `autoStart: false` skips the helper until settings turn it back on.
 */
 function apply(ctx, config = {}) {
 	logWebPort(ctx);
-	if (process.platform === "linux" || config.autoStart === false) return;
-	const runtime = new OrbRuntime(ctx);
+	const store = new ProfileStore(profileDirectory(ctx));
+	const tcc = new TccMonitor();
+	const runtime = new OrbRuntime(ctx, store);
+	installOrbServices(ctx, store);
+	console.error(`dsh-orb: profile ${store.dir}`);
 	ctx.effect(() => {
-		const detach = runtime.attachQuestions();
-		runtime.start().catch((error) => {
+		const detachQuestions = runtime.attachQuestions();
+		const detachPermissions = watchOrbPermissions(ctx, store);
+		const detachRoutes = registerOrbRoutes({
+			ctx,
+			store,
+			tcc,
+			control: runtime
+		});
+		if (process.platform !== "linux" && config.autoStart !== false && store.ballEnabled()) runtime.start().catch((error) => {
 			console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`);
 		});
 		return () => {
-			detach();
-			runtime.stop();
+			detachQuestions();
+			detachPermissions();
+			detachRoutes();
+			runtime.halt();
 		};
 	});
 }

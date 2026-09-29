@@ -1,4 +1,5 @@
-import { BrowserWindow, app, ipcMain, screen } from "electron";
+import { BrowserWindow, Menu, app, dialog, ipcMain, screen } from "electron";
+import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 const PANEL_SIZE = {
@@ -316,12 +317,145 @@ function center(bounds) {
 	};
 }
 //#endregion
+//#region src/model-menu.ts
+const CURRENT_MODEL_MARK = "✓ ";
+/** Provider headers, model rows, and effort radios. An empty catalog is one disabled row. */
+function modelMenuItems(catalog, current, onSelect, labels) {
+	const groups = catalog?.groups ?? [];
+	if (groups.length === 0) return [{
+		label: labels.empty,
+		enabled: false
+	}];
+	const items = [];
+	for (const group of groups) {
+		items.push({
+			label: group.name,
+			enabled: false
+		});
+		for (const model of group.models) items.push(modelItem(group.id, model, current, onSelect, labels.defaultEffort));
+	}
+	return items;
+}
+function modelItem(provider, model, current, onSelect, defaultEffortLabel) {
+	const selected = current.provider === provider && current.model === model.id;
+	const efforts = effortItems(provider, model, current, onSelect, defaultEffortLabel);
+	if (efforts === void 0) return {
+		label: model.name,
+		type: "checkbox",
+		checked: selected,
+		click: () => {
+			onSelect({
+				provider,
+				model: model.id
+			});
+		}
+	};
+	return {
+		label: selected ? `${CURRENT_MODEL_MARK}${model.name}` : model.name,
+		submenu: efforts
+	};
+}
+function effortItems(provider, model, current, onSelect, defaultEffortLabel) {
+	const reasoning = model.reasoning;
+	if (reasoning === void 0) return void 0;
+	const selected = current.provider === provider && current.model === model.id;
+	const effective = selected ? current.reasoningEffort ?? reasoning.defaultEffort : void 0;
+	const items = [];
+	if (reasoning.defaultEffort === void 0) items.push({
+		label: defaultEffortLabel,
+		type: "radio",
+		checked: selected && current.reasoningEffort === void 0,
+		click: () => {
+			onSelect({
+				provider,
+				model: model.id
+			});
+		}
+	});
+	for (const effort of reasoning.efforts) items.push({
+		label: effort.name,
+		type: "radio",
+		checked: effective === effort.id,
+		click: () => {
+			onSelect({
+				provider,
+				model: model.id,
+				reasoningEffort: effort.id
+			});
+		}
+	});
+	return items.length === 0 ? void 0 : items;
+}
+//#endregion
+//#region src/menu.ts
+/** Right-click menu for the ball. Model rows come from the host catalog. */
+/** Labels and actions for the ball menu. The selection switch only changes the stored preference. */
+function contextMenuTemplate(state, zh, actions) {
+	const labels = {
+		empty: zh ? "没有可用的模型。" : "No models available.",
+		defaultEffort: zh ? "默认" : "Default"
+	};
+	return [
+		{
+			label: zh ? "打开主窗口" : "Open Main Window",
+			click: () => {
+				actions.openMain();
+			}
+		},
+		{
+			label: zh ? "悬浮球 Agent 模型" : "Floating-ball Agent model",
+			submenu: modelMenuItems(state.catalog, state.overlay, actions.setOverlay, labels)
+		},
+		{
+			label: zh ? "后台 Agent 模型" : "Background Agent model",
+			submenu: modelMenuItems(state.catalog, state.background, actions.setBackground, labels)
+		},
+		{
+			label: zh ? "划词工具栏" : "Selection toolbar",
+			type: "checkbox",
+			checked: state.selectionEnabled,
+			click: (item) => {
+				actions.setSelection(item.checked);
+			}
+		},
+		{
+			label: zh ? "千分比坐标" : "Millifraction coordinates",
+			type: "checkbox",
+			checked: state.millifractionEnabled,
+			click: (item) => {
+				actions.setMillifraction(item.checked);
+			}
+		},
+		{ type: "separator" },
+		{
+			label: zh ? "停用悬浮球" : "Disable floating ball",
+			click: () => {
+				actions.disable();
+			}
+		}
+	];
+}
+//#endregion
 //#region src/main.ts
 /**
 * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
 */
 const socketAddress = process.env.DSH_ORB_SOCKET ?? "";
 const token = process.env.DSH_ORB_TOKEN ?? "";
+const webPort = process.env.DSH_ORB_WEB_PORT ?? "";
+const defaultSelection = {
+	provider: "deepseek-official",
+	model: "deepseek-flash",
+	reasoningEffort: "max"
+};
+let chrome = {
+	overlay: defaultSelection,
+	background: defaultSelection,
+	selectionEnabled: false,
+	millifractionEnabled: false,
+	catalog: { groups: [] }
+};
+let avatarToken = 0;
 process.title = "dsh-orb-helper";
 if (!socketAddress || !token) {
 	console.error("dsh-orb helper: socket environment is missing");
@@ -401,6 +535,31 @@ ipcMain.on("orb:question-cancel", (_event, id) => {
 		id
 	});
 });
+ipcMain.on("orb:history", () => {
+	write({ type: "history" });
+});
+ipcMain.on("orb:open", (_event, sessionId) => {
+	if (typeof sessionId === "string") write({
+		type: "open",
+		sessionId
+	});
+});
+ipcMain.on("orb:new", () => {
+	write({ type: "new" });
+});
+ipcMain.on("orb:permission", (_event, preset) => {
+	if (typeof preset === "string") write({
+		type: "permission",
+		preset
+	});
+});
+ipcMain.on("orb:stop", () => {
+	write({ type: "stop" });
+});
+ipcMain.handle("orb:menu", async () => {
+	write({ type: "menu" });
+	if (win) await showMenu(win);
+});
 function openWindow() {
 	const bounds = initialWindowBounds(screen.getPrimaryDisplay().workArea);
 	const created = new BrowserWindow({
@@ -438,6 +597,14 @@ function openWindow() {
 		skipTransformProcessType: true
 	});
 	created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+	created.webContents.on("context-menu", (event, params) => {
+		if (params?.isEditable) return;
+		event.preventDefault();
+		write({ type: "menu" });
+		setTimeout(() => {
+			showMenu(created);
+		}, 30);
+	});
 	created.webContents.on("will-navigate", (event) => {
 		event.preventDefault();
 	});
@@ -527,7 +694,30 @@ function deliver(message) {
 		win.webContents.send("orb:question-clear", record.id);
 		return;
 	}
-	if (record.type === "question-error") win.webContents.send("orb:question-error", message);
+	if (record.type === "question-error") {
+		win.webContents.send("orb:question-error", message);
+		return;
+	}
+	if (record.type === "permission") {
+		win.webContents.send("orb:permission", record.preset);
+		return;
+	}
+	if (record.type === "history") {
+		win.webContents.send("orb:history", record.items);
+		return;
+	}
+	if (record.type === "reset") {
+		win.webContents.send("orb:reset");
+		return;
+	}
+	if (record.type === "chrome") {
+		chrome = readChrome(record);
+		return;
+	}
+	if (record.type === "avatar") {
+		const version = record.version;
+		loadAvatar(typeof version === "number" ? version : 0);
+	}
 }
 function write(message) {
 	if (!live) return;
@@ -537,6 +727,125 @@ function isMove(value) {
 	if (typeof value !== "object" || value === null) return false;
 	const point = value;
 	return typeof point.x === "number" && typeof point.y === "number" && Number.isFinite(point.x) && Number.isFinite(point.y) && Math.abs(point.x) <= 1e5 && Math.abs(point.y) <= 1e5 && typeof point.canDock === "boolean";
+}
+function zhLocale() {
+	return (app.getLocale?.() ?? process.env.LANG ?? "").toLowerCase().startsWith("zh");
+}
+function readChrome(value) {
+	const record = value;
+	return {
+		overlay: selectionOr(record.overlay, chrome.overlay),
+		background: selectionOr(record.background, chrome.background),
+		selectionEnabled: record.selectionEnabled === true,
+		millifractionEnabled: record.millifractionEnabled === true,
+		catalog: record.catalog ?? { groups: [] }
+	};
+}
+function selectionOr(value, fallback) {
+	if (!value || typeof value.provider !== "string" || typeof value.model !== "string") return fallback;
+	return value;
+}
+async function showMenu(window) {
+	const template = contextMenuTemplate(chrome, zhLocale(), {
+		openMain: () => {
+			write({ type: "open-main" });
+		},
+		setOverlay: (selection) => {
+			write({
+				type: "set-overlay",
+				selection
+			});
+		},
+		setBackground: (selection) => {
+			write({
+				type: "set-background",
+				selection
+			});
+		},
+		setSelection: (enabled) => {
+			write({
+				type: "set-selection",
+				enabled
+			});
+		},
+		setMillifraction: (enabled) => {
+			confirmMillifraction(window, enabled);
+		},
+		disable: () => {
+			write({ type: "disable" });
+		}
+	});
+	Menu.buildFromTemplate(template).popup({ window });
+}
+async function confirmMillifraction(window, enabled) {
+	if (enabled === chrome.millifractionEnabled) return;
+	const zh = zhLocale();
+	const { response } = await dialog.showMessageBox(window, {
+		type: "question",
+		message: zh ? "新编码只在新对话中生效。" : "The new encoding takes effect in a new conversation.",
+		detail: zh ? "当前对话不变，仍可从历史记录打开。取消不写入、不新建。" : "The current conversation stays unchanged and remains in History. Cancel leaves the default and this chat as they are.",
+		buttons: zh ? ["取消", "新建对话"] : ["Cancel", "Create new conversation"],
+		defaultId: 1,
+		cancelId: 0,
+		noLink: true
+	});
+	if (response !== 1) return;
+	write({
+		type: "set-millifraction",
+		enabled
+	});
+}
+async function loadAvatar(version) {
+	const tokenId = ++avatarToken;
+	if (!win) return;
+	if (!version) {
+		win.webContents.send("orb:avatar", "");
+		return;
+	}
+	const image = await fetchAvatar(version);
+	if (tokenId !== avatarToken || !win || !image) return;
+	win.webContents.send("orb:avatar", `data:${image.mime};base64,${image.body.toString("base64")}`);
+}
+function fetchAvatar(version) {
+	const port = Number(webPort);
+	if (!Number.isInteger(port) || port <= 0 || !token) return Promise.resolve(void 0);
+	return new Promise((resolve) => {
+		const req = request({
+			hostname: "127.0.0.1",
+			port,
+			path: `/.dsh-orb/avatar?v=${Math.trunc(version)}`,
+			method: "GET",
+			headers: { "x-dsh-orb-helper": token }
+		}, (res) => {
+			const chunks = [];
+			let size = 0;
+			res.on("data", (chunk) => {
+				size += chunk.length;
+				if (size > 25e5) {
+					req.destroy();
+					resolve(void 0);
+					return;
+				}
+				chunks.push(chunk);
+			});
+			res.on("end", () => {
+				if (res.statusCode !== 200) {
+					resolve(void 0);
+					return;
+				}
+				resolve({
+					mime: (typeof res.headers["content-type"] === "string" ? res.headers["content-type"].split(";")[0] : "image/gif") ?? "image/gif",
+					body: Buffer.concat(chunks)
+				});
+			});
+		});
+		req.setTimeout(5e3, () => {
+			req.destroy();
+			resolve(void 0);
+		});
+		req.on("error", () => resolve(void 0));
+		req.end();
+	});
 }
 //#endregion
 export {};

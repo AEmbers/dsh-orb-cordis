@@ -1,0 +1,59 @@
+/** Right-click menu for the ball. Model rows come from the host catalog. */
+
+import { modelMenuItems, type MenuCatalog, type MenuItem, type MenuSelection } from './model-menu.ts'
+
+export interface ContextMenuState {
+  readonly catalog: MenuCatalog
+  readonly overlay: MenuSelection
+  readonly background: MenuSelection
+  readonly selectionEnabled: boolean
+  readonly millifractionEnabled: boolean
+}
+
+export interface ContextMenuActions {
+  openMain(): void
+  setOverlay(selection: MenuSelection): void
+  setBackground(selection: MenuSelection): void
+  setSelection(enabled: boolean): void
+  setMillifraction(enabled: boolean): void
+  disable(): void
+}
+
+/** Labels and actions for the ball menu. The selection switch only changes the stored preference. */
+export function contextMenuTemplate(state: ContextMenuState, zh: boolean, actions: ContextMenuActions): MenuItem[] {
+  const labels = {
+    empty: zh ? '没有可用的模型。' : 'No models available.',
+    defaultEffort: zh ? '默认' : 'Default',
+  }
+  return [
+    {
+      label: zh ? '打开主窗口' : 'Open Main Window',
+      click: () => { actions.openMain() },
+    },
+    {
+      label: zh ? '悬浮球 Agent 模型' : 'Floating-ball Agent model',
+      submenu: modelMenuItems(state.catalog, state.overlay, actions.setOverlay, labels),
+    },
+    {
+      label: zh ? '后台 Agent 模型' : 'Background Agent model',
+      submenu: modelMenuItems(state.catalog, state.background, actions.setBackground, labels),
+    },
+    {
+      label: zh ? '划词工具栏' : 'Selection toolbar',
+      type: 'checkbox',
+      checked: state.selectionEnabled,
+      click: (item) => { actions.setSelection(item.checked) },
+    },
+    {
+      label: zh ? '千分比坐标' : 'Millifraction coordinates',
+      type: 'checkbox',
+      checked: state.millifractionEnabled,
+      click: (item) => { actions.setMillifraction(item.checked) },
+    },
+    { type: 'separator' },
+    {
+      label: zh ? '停用悬浮球' : 'Disable floating ball',
+      click: () => { actions.disable() },
+    },
+  ]
+}
