@@ -20,7 +20,7 @@
 
 - pnpm workspace，ESM，`"type": "module"`，用官方各包那种 `tsdown.config.ts` 打包。
 - 开发机已有官方桌面预览 `/Applications/DeepSeek Harness.app` `0.1.7-rc.2`。CLI 用同一版本的官方 `dsh`，不要用 fork 的 `dev:desktop` 当验收对象。
-- 包名先用 `@dsh-orb/*`。发布前查 npm 占用。
+- 工作区内的包名用 `@dsh-orb/*`，它们不发布。用户安装的只有 `dsh-orb`。发布前查 npm 上 `dsh-orb` 是否被占用。
 
 验收：`dsh plugin add file:<空 bundle 的 tgz>` 在官方 `dsh web` 上成功，配置树里看得到插入行。
 
@@ -78,7 +78,7 @@
 
 - 中英 README、设置页文案、`icon.svg`。
 - 读 plugin manager 的 `evaluatePluginCompatibility`，声明兼容的官方 dsh 版本。当前目标是 `0.1.7-rc.2`。官方发新版本时 bump 依赖并重跑阶段 1 和阶段 2 的验收。
-- 发布 `dsh-orb` 以及它依赖的 `@dsh-orb/*`。安装说明只有两句：桌面版在插件页填包名；命令行是 `dsh plugin add dsh-orb`。
+- 只发布 `dsh-orb` 一个包，它已经包含 host、Computer Use、helper 和划词的构建产物。安装说明只有两句：桌面版在插件页填包名；命令行是 `dsh plugin add dsh-orb`。
 - 过一遍 §8 的安全清单。
 
 ## 7. 风险

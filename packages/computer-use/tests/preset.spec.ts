@@ -73,8 +73,8 @@ describe('computer-use overlay and extra root', () => {
     const built = await readFile(BUILT_OVERLAY, 'utf8')
     expect(built).toContain('id: preset-computer-use')
     expect(built).toContain('name: \'@deepseek-ai/dsh-agent-preset\'')
-    expect(built).toContain('name: \'@dsh-orb/computer-use\'')
-    expect(built).toContain('name: \'@dsh-orb/computer-use/code-agent\'')
+    expect(built).toContain('name: \'dsh-orb/computer-use\'')
+    expect(built).toContain('name: \'dsh-orb/computer-use/code-agent\'')
     expect(built).not.toContain('computer-use-preset-root')
   })
 

@@ -1,8 +1,8 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { boundContextSummary, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { brandString } from "@deepseek-ai/dsh-brand";
 const NO_ASSISTANT = "The Code agent session ended without a final assistant message.";
 /**
@@ -177,8 +177,28 @@ function attachUnattendedCodeAgent(code, attached) {
 }
 //#endregion
 //#region src/select-model.ts
+/**
+* Official `selectModel` always writes the chosen model as the global default.
+* A later `saveSelection` is queued behind that write, so the previous default is restored.
+* Those settings fields are volatile, so the write does not restart plugins.
+*
+* Calls are serialized across every copy of this module in the process, so the ball and `code_agent`
+* cannot interleave their select and restore steps. A short window still remains: official
+* `selectModel` has no session-only option, so another window that creates a session between the
+* official write and the restore sees the chosen model once.
+*/
+const QUEUE = Symbol.for("dsh-orb.select-model.queue");
+function enqueue(task) {
+	const holder = globalThis;
+	const run = (holder[QUEUE] ?? Promise.resolve()).then(task, task);
+	holder[QUEUE] = run.catch(() => void 0);
+	return run;
+}
 /** Apply a model to one session, then put the global default back if it changed. */
-async function selectModelKeepDefault(ctx, request) {
+function selectModelKeepDefault(ctx, request) {
+	return enqueue(() => selectAndRestore(ctx, request));
+}
+async function selectAndRestore(ctx, request) {
 	const defaults = ctx.agentDefaultModel;
 	const previous = defaults?.currentSelection();
 	const chosen = {

@@ -216,7 +216,7 @@ describe('settings section', () => {
     assert.deepEqual(pkg.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-settings'])
     const patch = readFileSync(join(root, 'packages/bundle/cordis.patch.yml'), 'utf8')
     assert.match(patch, /id: ui-settings-orb/)
-    assert.match(patch, /name: '@dsh-orb\/client-ui-settings-orb'/)
+    assert.match(patch, /id: ui-settings-orb\n\s+name: dsh-orb\n/)
     const client = readFileSync(join(here, '../client.js'), 'utf8')
     assert.match(client, /在其他应用里选中文字会出现搜索、翻译和发给 Agent/)
     assert.equal(client.includes('authenticatedUrl'), false)

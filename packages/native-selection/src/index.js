@@ -1,6 +1,6 @@
 /** Selection monitor. Darwin uses the prebuilt dylib; Windows uses koffi hooks. */
 
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -77,9 +77,7 @@ function loadDarwin() {
 }
 
 function darwinLibrary() {
-  const universal = join(here, '..', 'prebuilds', 'darwin-universal', 'libmacos-selection.dylib')
-  if (existsSync(universal)) return universal
-  return join(here, '..', 'prebuilds', `darwin-${process.arch}`, 'libmacos-selection.dylib')
+  return join(here, '..', 'prebuilds', 'darwin-universal', 'libmacos-selection.dylib')
 }
 
 function startDarwin(handlers) {

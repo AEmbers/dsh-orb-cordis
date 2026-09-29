@@ -20,6 +20,7 @@
  */
 
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -74,10 +75,12 @@ const SIPS = '/usr/bin/sips'
 
 /**
  * Absolute path of the Darwin ScreenCaptureKit overlay-exclude helper.
- * The binary sits in `lib/` next to the bundled plugin; source tests resolve the same file.
+ * The binary sits next to the bundled plugin file (`lib/`, or the installed `dist/computer-use/`); source tests fall back to `../lib/`.
  * @returns the helper executable path.
  */
 export function macosSckCaptureHelperPath(): string {
+  const beside = fileURLToPath(new URL('./macos-sck-capture', import.meta.url))
+  if (existsSync(beside)) return beside
   return fileURLToPath(new URL('../lib/macos-sck-capture', import.meta.url))
 }
 

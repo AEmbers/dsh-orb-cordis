@@ -57,14 +57,14 @@
               fetch: true
               searchTimeoutMs: 60000
           - id: tool-computer-use
-            name: '@dsh-orb/computer-use'
+            name: 'dsh-orb/computer-use'
             config:
               postActionWaitMs: 600
           - id: tool-code-agent
-            name: '@dsh-orb/computer-use/code-agent'
+            name: 'dsh-orb/computer-use/code-agent'
     - id: orb-host
-      name: '@dsh-orb/host'
+      name: 'dsh-orb/host'
       config:
         autoStart: true
     - id: ui-settings-orb
-      name: '@dsh-orb/client-ui-settings-orb'
+      name: dsh-orb

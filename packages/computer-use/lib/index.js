@@ -1,4 +1,4 @@
-import { c as modelPositionToHid, d as requirePixelPosition, f as runWithCaptureExcludeWindowIds, i as createPlatformBackend, l as requireClickModifiers, n as FOCUS_NOTE, o as delay, r as UNFOCUSED_WINDOW_NOTE, s as assertAllowedHotkey, t as FOCUS_FALLBACK_FOREGROUND, u as requireNormalizedPosition } from "./backend-Dz2np8ZB.js";
+import { c as modelPositionToHid, d as requirePixelPosition, f as runWithCaptureExcludeWindowIds, i as createPlatformBackend, l as requireClickModifiers, n as FOCUS_NOTE, o as delay, r as UNFOCUSED_WINDOW_NOTE, s as assertAllowedHotkey, t as FOCUS_FALLBACK_FOREGROUND, u as requireNormalizedPosition } from "./backend-BKdOnAAS.js";
 import * as fs from "node:fs/promises";
 import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";

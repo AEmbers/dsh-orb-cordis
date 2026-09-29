@@ -11,7 +11,7 @@
 │    └─ spawn Host（ELECTRON_RUN_AS_NODE=1）
 │         ├─ 官方 cordis 树
 │         └─ 我们的插件
-│              ├─ @dsh-orb/host
+│              ├─ dsh-orb/host
 │              │    会话、权限、坐标、后台模型、web 路由、helper 生命周期、划词监控
 │              ├─ computer-use 工具与 code_agent（挂在 computer-use preset 上）
 │              └─ 设置页 client 插件
@@ -40,11 +40,22 @@ helper 不使用 `/Applications/DeepSeek Harness.app` 里的可执行文件。�
 | `packages/helper` | `@dsh-orb/helper` | Electron 入口 | 球、工具条、观察框、preload、页面 |
 | `packages/native-selection` | `@dsh-orb/native-selection` | 原生模块 | macOS 划词（napi + Swift）。Windows 划词继续用 koffi，不必单独预编译 |
 | `packages/client-settings` | `@dsh-orb/client-ui-settings-orb` | client 插件 | 主窗口「悬浮球」设置。`desktop-api.ts` 改为请求 Host 的 HTTP |
-| `packages/bundle` | `dsh-orb` | bundle | 唯一发布给用户安装的包。patch 插入 preset、host、设置页 |
+| `packages/bundle` | `dsh-orb` | bundle | 唯一发布给用户安装的包，也是设置页 client 插件本身。`scripts/assemble.mjs` 把其余包的构建产物收进 `dsh-orb/dist`。patch 插入 preset、host、设置页 |
+
+除 `dsh-orb` 以外的 `@dsh-orb/*` 都只是工作区里的源码包，`private`，不发布，也不会出现在用户的 `node_modules`。原因：官方加载器（`readPluginMeta`、`manifestOf`、`dsh-client-modules` 的 `resolveMeta`）总是从 profile 根目录解析 patch 里的包名。嵌在 `dsh-orb/node_modules` 里的子包，或者 `link:` 安装时不会被安装的依赖，都解析不到。所以用户只装一个包，各部分用子路径导出：
+
+| patch 里的名字 | 指向 |
+|---|---|
+| `dsh-orb` | `lib/index.js`（设置页 Host 半边）。`./client` 是浏览器半边，模块 id 也是 `dsh-orb` |
+| `dsh-orb/host` | `dist/host/index.js` |
+| `dsh-orb/computer-use` | `dist/computer-use/index.js`，旁边是 ScreenCaptureKit 二进制 |
+| `dsh-orb/computer-use/code-agent` | `dist/computer-use/code-agent.js` |
+
+helper 在 `dist/helper`，划词监控在 `dist/native-selection`。Host 用相对路径找它们，工作区里回退到按包名解析。`lib/`、`dist/`、`client.js` 都是 `pnpm build` 生成的，不提交。
 
 阶段 1 可以先发一个只有 preset 的 `dsh-computer-use` bundle，用来在没有球的时候验证工具。阶段 2 把这条 preset 收进 `dsh-orb`，避免两个 bundle 插入同一个 `preset-computer-use`。用户文档只保留 `dsh plugin add dsh-orb`。
 
-`@deepseek-ai/dsh-*` 依赖范围是 `>=0.1.7-rc.2 <0.3.0-0`。代码按 `0.1.7-rc.2` 编译。上限写成 `<0.3.0-0`，这样 `0.3.0-rc.1` 不会被算进兼容范围。发布前确认 npm 上 `@dsh-orb` 或无 scope 的 `dsh-orb` 是否被占用；被占用就换名，文档里的职责不变。
+`@deepseek-ai/dsh-*` 依赖范围是 `>=0.1.7-rc.2 <0.3.0-0`。代码按 `0.1.7-rc.2` 编译。上限写成 `<0.3.0-0`，这样 `0.3.0-rc.1` 不会被算进兼容范围。发布前确认 npm 上无 scope 的 `dsh-orb` 是否被占用；被占用就换名，文档里的职责不变。因为只发布这一个包，`@dsh-orb` scope 不需要注册。
 
 ## 3. 从 fork 搬什么
 
@@ -155,7 +166,7 @@ client 插件改为 `fetch` 上面的路由。类型 `OrbSettingsSnapshot`、`Tc
 
 ## 7. bundle patch
 
-`dsh-orb` 的 `cordis.patch.yml` 插入下面三行。`plugins` 不在这里展开：从源仓库 `packages/experimental/tool-computer-use/cordis.patch.yml` 整段搬来，把其中的包名改成 `@dsh-orb/computer-use` 和 `@dsh-orb/computer-use/code-agent`。显示名和说明用这里写的中文，不用再读 `preset.yml`。
+`dsh-orb` 的 `cordis.patch.yml` 插入下面三行。`plugins` 不在这里展开：从源仓库 `packages/experimental/tool-computer-use/cordis.patch.yml` 整段搬来，把其中的包名改成 `dsh-orb/computer-use` 和 `dsh-orb/computer-use/code-agent`。显示名和说明用这里写的中文，不用再读 `preset.yml`。
 
 ```yaml
 - insert:
@@ -168,11 +179,11 @@ client 插件改为 `fetch` 上面的路由。类型 `OrbSettingsSnapshot`、`Tc
         order: 20
         plugins: []   # 实施时替换为源 patch 里的插件列表
     - id: orb-host
-      name: '@dsh-orb/host'
+      name: 'dsh-orb/host'
       config:
         autoStart: true
     - id: ui-settings-orb
-      name: '@dsh-orb/client-ui-settings-orb'
+      name: dsh-orb
 ```
 
 GUI 工具只出现在 `computer-use` 这个 preset 上，不写进官方默认的 `standard` preset。

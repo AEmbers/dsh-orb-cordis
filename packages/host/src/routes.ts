@@ -4,10 +4,8 @@
  * The helper may read only the avatar, and only with its socket token.
  */
 
-import { createRequire } from 'node:module'
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { normalizeCatalog, type ModelCatalog } from './catalog.ts'
 import {
@@ -18,9 +16,9 @@ import {
   type ProfileStore,
 } from './preferences.ts'
 import { selectionRuntimeAvailable } from '@dsh-orb/native-selection'
+import { defaultAvatarPath } from './helper-path.ts'
 import { isTccRight, type TccMonitor, type TccStatus } from './tcc.ts'
 
-const require = createRequire(import.meta.url)
 const PREFIX = '/.dsh-orb'
 const HELPER_HEADER = 'x-dsh-orb-helper'
 
@@ -254,11 +252,6 @@ async function sendAvatar(store: ProfileStore, method: string, res: ServerRespon
     'content-length': body.length,
   })
   res.end(method === 'HEAD' ? undefined : body)
-}
-
-function defaultAvatarPath(): string {
-  const pkg = require.resolve('@dsh-orb/helper/package.json')
-  return join(dirname(pkg), 'assets', 'deepseek-avatar-square.gif')
 }
 
 function helperTokenOk(deps: RouteDeps, req: IncomingMessage): boolean {

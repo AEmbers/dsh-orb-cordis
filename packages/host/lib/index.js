@@ -1,10 +1,11 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { createReadStream, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { accessibilityTrusted, promptAccessibility, selectionRuntimeAvailable, startSelectionMonitor } from "@dsh-orb/native-selection";
+import { fileURLToPath } from "node:url";
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { createServer } from "node:net";
 import { pipeline } from "node:stream/promises";
@@ -433,13 +434,34 @@ function asRecord$2(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 //#endregion
+//#region src/helper-path.ts
+/**
+* Where the helper's files are.
+* Installed `dsh-orb` keeps them next to this file: `dist/host/index.js` and `dist/helper/lib/main.js`.
+* In the workspace the helper is a separate package that Node resolves by name.
+*/
+const require = createRequire(import.meta.url);
+/** Root folder of the helper: holds `lib/`, `assets/` and the preload scripts. */
+function helperRoot() {
+	const assembled = fileURLToPath(new URL("../helper", import.meta.url));
+	if (existsSync(join(assembled, "lib", "main.js"))) return assembled;
+	return dirname(require.resolve("@dsh-orb/helper/package.json"));
+}
+/** Electron entry script of the helper. */
+function helperMain() {
+	return join(helperRoot(), "lib", "main.js");
+}
+/** Bundled default avatar. */
+function defaultAvatarPath() {
+	return join(helperRoot(), "assets", "deepseek-avatar-square.gif");
+}
+//#endregion
 //#region src/routes.ts
 /**
 * Settings routes on the official web port.
 * The main window calls these with a relative fetch, so the existing login cookie is enough.
 * The helper may read only the avatar, and only with its socket token.
 */
-const require$1 = createRequire(import.meta.url);
 const PREFIX = "/.dsh-orb";
 const HELPER_HEADER = "x-dsh-orb-helper";
 /** Mount `/.dsh-orb` and return the disposer. */
@@ -615,10 +637,6 @@ async function sendAvatar(store, method, res) {
 		"content-length": body.length
 	});
 	res.end(method === "HEAD" ? void 0 : body);
-}
-function defaultAvatarPath() {
-	const pkg = require$1.resolve("@dsh-orb/helper/package.json");
-	return join(dirname(pkg), "assets", "deepseek-avatar-square.gif");
 }
 function helperTokenOk(deps, req) {
 	const header = req.headers[HELPER_HEADER];
@@ -1341,8 +1359,28 @@ function productionAccessibility() {
 }
 //#endregion
 //#region src/select-model.ts
+/**
+* Official `selectModel` always writes the chosen model as the global default.
+* A later `saveSelection` is queued behind that write, so the previous default is restored.
+* Those settings fields are volatile, so the write does not restart plugins.
+*
+* Calls are serialized across every copy of this module in the process, so the ball and `code_agent`
+* cannot interleave their select and restore steps. A short window still remains: official
+* `selectModel` has no session-only option, so another window that creates a session between the
+* official write and the restore sees the chosen model once.
+*/
+const QUEUE = Symbol.for("dsh-orb.select-model.queue");
+function enqueue(task) {
+	const holder = globalThis;
+	const run = (holder[QUEUE] ?? Promise.resolve()).then(task, task);
+	holder[QUEUE] = run.catch(() => void 0);
+	return run;
+}
 /** Apply a model to one session, then put the global default back if it changed. */
-async function selectModelKeepDefault(ctx, request) {
+function selectModelKeepDefault(ctx, request) {
+	return enqueue(() => selectAndRestore(ctx, request));
+}
+async function selectAndRestore(ctx, request) {
 	const defaults = ctx.agentDefaultModel;
 	const previous = defaults?.currentSelection();
 	const chosen = {
@@ -1371,7 +1409,6 @@ function sameSelection(left, right) {
 * NDJSON control plane for the ball, plus the Computer Use session it talks to.
 * The helper never calls the official HTTP API. Messages arrive here and this process calls the host services.
 */
-const require = createRequire(import.meta.url);
 /** One host lifetime of the ball: socket, helper process, and one Computer Use session. */
 var OrbRuntime = class {
 	ctx;
@@ -2459,10 +2496,6 @@ var OrbRuntime = class {
 function helperDataDirectory(profileDir) {
 	const id = createHash("sha256").update(profileDir).digest("hex").slice(0, 16);
 	return dshHomePath("dsh-orb", "helper-data", id);
-}
-function helperMain() {
-	const pkg = require.resolve("@dsh-orb/helper/package.json");
-	return join(dirname(pkg), "lib", "main.js");
 }
 function isPrompt(message) {
 	if (typeof message !== "object" || message === null) return false;

@@ -6,12 +6,12 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
-import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { normalizeCatalog } from './catalog.ts'
 import { resolveElectronBinary } from './electron-runtime.ts'
+import { helperMain } from './helper-path.ts'
 import { openMainWindow } from './open-main.ts'
 import { isDesktopHost, isTccRight, TccMonitor, type TccRight, type TccStatus } from './tcc.ts'
 import {
@@ -31,8 +31,6 @@ import {
 } from './selection.ts'
 import { pinSessionId } from './services.ts'
 import { selectModelKeepDefault } from './select-model.ts'
-
-const require = createRequire(import.meta.url)
 
 /** Host services the plugin injects. Shapes match the official 0.1.7-rc.2 controllers. */
 export interface OrbContext {
@@ -1205,11 +1203,6 @@ export class OrbRuntime {
 function helperDataDirectory(profileDir: string): string {
   const id = createHash('sha256').update(profileDir).digest('hex').slice(0, 16)
   return dshHomePath('dsh-orb', 'helper-data', id)
-}
-
-function helperMain(): string {
-  const pkg = require.resolve('@dsh-orb/helper/package.json')
-  return join(dirname(pkg), 'lib', 'main.js')
 }
 
 function isPrompt(message: unknown): message is { type: 'prompt'; text: string } {
