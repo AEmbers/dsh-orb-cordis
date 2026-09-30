@@ -786,6 +786,12 @@ function main() {
   }
 
   async function writeClipboard(text) {
+    // Main-process write: renderer clipboard APIs reject while the ball window
+    // rests unfocused ("Document is not focused").
+    if (typeof api?.copy === 'function') {
+      api.copy(text)
+      return true
+    }
     if (navigator.clipboard?.writeText !== undefined) {
       try {
         await navigator.clipboard.writeText(text)

@@ -121,6 +121,11 @@ declare module 'electron' {
     openExternal(url: string, options?: { activate?: boolean }): Promise<void>
   }
 
+  export const clipboard: {
+    writeText(text: string): void
+    readText(): string
+  }
+
   export const nativeTheme: {
     themeSource: 'light' | 'dark' | 'system'
     shouldUseDarkColors: boolean

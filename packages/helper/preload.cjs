@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld('dshOrb', {
   stop() {
     ipcRenderer.send('orb:stop')
   },
+  copy(text) {
+    ipcRenderer.send('orb:copy', text)
+  },
   openMenu() {
     return ipcRenderer.invoke('orb:menu')
   },

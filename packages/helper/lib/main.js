@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, screen, shell } from "electron";
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeTheme, screen, shell } from "electron";
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -1077,6 +1077,11 @@ ipcMain.on("orb:permission", (event, preset) => {
 ipcMain.on("orb:stop", (event) => {
 	if (!fromBall(event)) return;
 	write({ type: "stop" });
+});
+ipcMain.on("orb:copy", (event, text) => {
+	if (!fromBall(event)) return;
+	if (typeof text !== "string" || text.length > 1e6) return;
+	clipboard.writeText(text);
 });
 ipcMain.handle("orb:menu", async (event) => {
 	if (!fromBall(event) || !win) return;

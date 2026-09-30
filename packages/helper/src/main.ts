@@ -2,7 +2,7 @@
  * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, screen, shell } from 'electron'
 import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -162,6 +162,14 @@ ipcMain.on('orb:permission', (event, preset) => {
 ipcMain.on('orb:stop', (event) => {
   if (!fromBall(event)) return
   write({ type: 'stop' })
+})
+
+// Renderer clipboard APIs need a focused document; the ball rests unfocused,
+// so writes go through the main process, which has no such gate.
+ipcMain.on('orb:copy', (event, text) => {
+  if (!fromBall(event)) return
+  if (typeof text !== 'string' || text.length > 1_000_000) return
+  clipboard.writeText(text)
 })
 
 ipcMain.handle('orb:menu', async (event) => {
