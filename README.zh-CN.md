@@ -1,4 +1,4 @@
-<p align="center"><img src="packages/helper/assets/deepseek-avatar-square.gif" width="120" alt="dsh-orb 悬浮球"></p>
+<p align="center"><img src="docs/assets/ball.png" width="120" alt="dsh-orb 悬浮球"></p>
 
 # dsh-orb
 
