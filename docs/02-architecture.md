@@ -1,7 +1,7 @@
 # dsh-orb 架构
 
 > 实施蓝图。为什么这样做见 [01-analysis.md](01-analysis.md)，分几步做见 [03-plan.md](03-plan.md)。
-> 源仓库指 `/Users/gaoyifan/Desktop/Project/deepseek-harness`。本仓库是插件 monorepo，不修改源仓库。
+> 源仓库指 fork `mini-yifan/deepseek-harness-orb`。本仓库是插件 monorepo，不修改源仓库。
 
 ## 1. 进程
 

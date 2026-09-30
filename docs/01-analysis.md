@@ -1,10 +1,10 @@
 # dsh-orb 可行性与产品结论
 
-> 修订日期：2026-09-28。实施以本文、[02-architecture.md](02-architecture.md)、[03-plan.md](03-plan.md) 为准。与同事原稿的差异见 [04-addenda.md](04-addenda.md)。
+> 修订日期：2026-09-28。实施以本文、[02-architecture.md](02-architecture.md)、[03-plan.md](03-plan.md) 为准。与初版分析的差异见 [04-addenda.md](04-addenda.md)。
 >
-> 源项目：`/Users/gaoyifan/Desktop/Project/deepseek-harness`（fork `mini-yifan/deepseek-harness-orb`，`72f1d738`，基于官方 `0.1.7-rc.1`）。
+> 源项目：fork `mini-yifan/deepseek-harness-orb`（`72f1d738`，基于官方 `0.1.7-rc.1`）。
 > 对照的官方树：`deepseek-ai/deepseek-harness` `master` `21638c56`，版本 `0.1.7-rc.2`（2026-09-27）。
-> 本机官方预览：`/Applications/DeepSeek Harness.app`，`0.1.7-rc.2`，Developer ID `NAN929V4UM`。
+> 对照的官方预览：DeepSeek Harness 桌面版 `0.1.7-rc.2`，Developer ID `NAN929V4UM`。
 
 ## 1. 结论
 
