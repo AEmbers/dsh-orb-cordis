@@ -193,7 +193,7 @@ describe('macOS backend with an injected runner', () => {
     expect(captured.mediaType).toBe('image/png')
     expect(captured.data).toEqual(FAKE_DESKTOP_PNG)
     expect(files).toEqual(['/usr/sbin/screencapture', '/usr/bin/sips'])
-    expect(args[0]?.slice(0, 3)).toEqual(['-x', '-t', 'jpg'])
+    expect(args[0]?.slice(0, 4)).toEqual(['-x', '-C', '-t', 'jpg'])
     expect(args[1]?.slice(0, 6)).toEqual(['--cropOffset', '0', '0', '-c', '100', '200'])
   })
 
@@ -216,7 +216,7 @@ describe('macOS backend with an injected runner', () => {
     args.length = 0
     await backend.capture(screen!)
     expect(files).toEqual(['/usr/sbin/screencapture', '/usr/bin/sips'])
-    expect(args[0]?.slice(0, 3)).toEqual(['-x', '-t', 'jpg'])
+    expect(args[0]?.slice(0, 4)).toEqual(['-x', '-C', '-t', 'jpg'])
     expect(args[1]?.slice(0, 6)).toEqual(['--cropOffset', '40', '20', '-c', '600', '800'])
   })
 
@@ -228,7 +228,7 @@ describe('macOS backend with an injected runner', () => {
       index: 0, bounds: { x: 0, y: 0, width: 100, height: 50 }, scale: 2,
     })
     expect(files).toEqual(['/usr/sbin/screencapture', '/usr/bin/sips'])
-    expect(args[0]?.slice(0, 3)).toEqual(['-x', '-t', 'jpg'])
+    expect(args[0]?.slice(0, 4)).toEqual(['-x', '-C', '-t', 'jpg'])
   })
 
   it('captures JPEG bytes as image/jpeg', async () => {

@@ -896,7 +896,8 @@ export function createMacosDesktopBackend(
         const region = regionCaptureSpec(screen.bounds)
         if (excludeWindowIds.length === 0) {
           const full = join(dir, 'full.jpg')
-          await run(SCREENCAPTURE, ['-x', '-t', 'jpg', full], { signal })
+          // `-C` bakes the system cursor into the raster so the agent can see where its clicks actually land.
+          await run(SCREENCAPTURE, ['-x', '-C', '-t', 'jpg', full], { signal })
           const crop = regionCropPixels(screen)
           await run(SIPS, [
             '--cropOffset',

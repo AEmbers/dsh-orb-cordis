@@ -1,4 +1,4 @@
-import { a as encodeBgraPng } from "./backend-BKdOnAAS.js";
+import { a as encodeBgraPng } from "./backend-DotNNjKZ.js";
 import { execFileSync } from "node:child_process";
 import koffi from "koffi";
 //#region src/windows-native.ts

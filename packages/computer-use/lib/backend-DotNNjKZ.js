@@ -1046,6 +1046,7 @@ function createMacosDesktopBackend(run = runCommand, excludedRegionCapture) {
 					const full = join(dir, "full.jpg");
 					await run(SCREENCAPTURE, [
 						"-x",
+						"-C",
 						"-t",
 						"jpg",
 						full
@@ -1614,7 +1615,7 @@ function screenFromObservation(selected) {
 }
 let productionOps;
 async function production() {
-	productionOps ??= (await import("./windows-native-BCwGd0ja.js")).createProductionWindowsOps();
+	productionOps ??= (await import("./windows-native-CXcyXe5q.js")).createProductionWindowsOps();
 	return productionOps;
 }
 /**
