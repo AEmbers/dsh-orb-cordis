@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mainWindowTarget, openCommand } from '../src/open-main.ts'
+import { mainWindowTarget, openCommand, openEnvironment } from '../src/open-main.ts'
 import { isDesktopHost, isTccRight, tccAppName } from '../src/tcc.ts'
 
 describe('open main window', () => {
@@ -27,6 +27,25 @@ describe('open main window', () => {
       command: 'cmd',
       args: ['/c', 'start', '', 'http://127.0.0.1:1/'],
     })
+  })
+
+  it('drops the Node-mode marker from the opener environment', () => {
+    const marker = 'ELECTRON_RUN_AS_NODE'
+    assert.equal(openEnvironment({ [marker]: '1', PATH: '/usr/bin' })[marker], undefined)
+    assert.equal(openEnvironment({ [marker]: '1', PATH: '/usr/bin' }).PATH, '/usr/bin')
+    // The caller's environment object is copied, never mutated.
+    const source: NodeJS.ProcessEnv = { [marker]: '1' }
+    openEnvironment(source)
+    assert.equal(source[marker], '1')
+    const previous = process.env[marker]
+    process.env[marker] = '1'
+    try {
+      assert.equal(openEnvironment()[marker], undefined)
+      assert.equal(process.env[marker], '1')
+    } finally {
+      if (previous === undefined) delete process.env[marker]
+      else process.env[marker] = previous
+    }
   })
 
   it('names the permission dialog DeepSeek Harness on the desktop host and the terminal otherwise', () => {
