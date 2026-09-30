@@ -24,6 +24,13 @@ export interface OverlayGuardTransport {
   hasHelper(): boolean
   send(message: { id: string; type: string; [key: string]: unknown }, signal?: AbortSignal): Promise<void>
   setHidInput(active: boolean): void
+  /**
+   * Overlay window ids the capture must skip when it picks an observation window.
+   * A Windows helper reports the ball, toolbar, and frame handles, so a click on the ball
+   * cannot make it the window the agent believes the user is working in. A macOS helper
+   * reports nothing: the ball there is a non-activating panel and never becomes foreground.
+   */
+  chromeWindowIds?(): readonly number[]
   sleep?(ms: number): Promise<void>
 }
 
@@ -56,7 +63,10 @@ export function createOverlayGuard(transport: OverlayGuardTransport) {
           await begin
           await sleep(OVERLAY_GUARD_CAPTURE_SETTLE_MS)
         }
-        return await run({ excludeWindowIds: [] })
+        // Inside an input interval the helper already cloaks every chrome window, so the
+        // nested capture sends no IPC. It still needs the ids: the post-action screenshot
+        // is taken while the ball may hold the foreground.
+        return await run({ excludeWindowIds: transport.chromeWindowIds?.() ?? [] })
       } finally {
         captureDepth -= 1
         if (sentBegin) {

@@ -85,7 +85,7 @@ Agent 执行期间看不到光标:点偏了无法自查,会误判为「点了没
 - 常规路径(生产唯一路径,排除表恒空):`screencapture -x` 加 `-C`,由 WindowServer 把系统光标原位烤进全屏图,sips 裁剪后光标随裁剪保留。本机 macOS 26 实测光标位置与真实指针一致。
 - SCK helper 路径(CLI 与 dylib 共用):`SCScreenshotManager` 的 `showsCursor` 在各版本上表现不一且窗口滤镜根本不含光标层,改为 `showsCursor = false` + 捕获后手动合成:SkyLight `CGSCopyCursor`(macOS 26 已无此符号,回落 `NSCursor.currentSystem`)取真实光标位图,再画一圈红底白边的定位环,环心即指针精确位置——热点换算按返回 CGImage 的实际倍率(`representations.first` 可能低于实际返回的倍率,曾导致尖端偏 5pt)。指针在区域外(留 12pt 边距)则原图返回,光标隐藏时不画,避免幻影。
 
-合成逻辑带 `-D DSH_SCK_COMPOSITE_TEST` 独立测试入口(合成 2x 位图实拍验证尖端与环心重合)。本机 SCK 的内容枚举拿不到 displays 且流启动失败(macOS 26 环境先在问题),region 路径端到端仍以实机为准;Windows 的 GDI `capturePng` 同样不含光标,留待后续。
+合成逻辑带 `-D DSH_SCK_COMPOSITE_TEST` 独立测试入口(合成 2x 位图实拍验证尖端与环心重合)。本机 SCK 的内容枚举拿不到 displays 且流启动失败(macOS 26 环境先在问题),region 路径端到端仍以实机为准;Windows 的 GDI `capturePng` 同样不含光标,留待后续(已解决,见第 10 节)。
 
 ## 5. Agent 执行期间遮蔽悬浮球(2026-09-30)
 
@@ -143,3 +143,19 @@ Agent 执行期间看不到光标:点偏了无法自查,会误判为「点了没
 - 设置页:头像卡片在上传/恢复默认下面多一排动图缩略图(48px 圆形,自带预览 72px),选中项描边用官方 `--dsh-alias-button-info-fill`,点击 POST 选,`aria-pressed` 跟随快照;`avatarPresets` 缺失时整排不渲染(老 host 不会画出空框)。
 - 测试:helper 新增 avatar 组(src 合法性、custom 需要 version、旧消息回落);host preferences 组补「一个 profile 一张头像」全流程(选/传互斥、未知 id、半写状态、旧 meta);routes 组补画廊列表、字节、鉴权、目录穿越、选中后 `/avatar` 返回同一份字节、非法 id 400;runtime 组补「连上即发 avatar 描述、选 preset 后带 src」;设置页组按 host 真清单渲染画廊并断言每个 id 都有中文名(host 加 preset 而设置页漏文案会直接红)、点击 POST 的 body、选中描边;bundle 装配清单改为遍历 `assets/avatars/` 全量断言。`pnpm typecheck` 与全量测试通过。
 - Electron 冒烟(`.zcode/smoke/orb-avatar-smoke.cjs`,装配后的 `dist/helper/assets`):按生产通道灌 `orb:avatar` 字符串,断言内置 GIF 在真实 CSP 下解码成功(256×256)、静止态照旧冻结成 still(canvas 快照,256×256)、展开/运行时球面真的在动——用 `capturePage` 对球的矩形连续取帧,静止态 4 帧完全相同(排除重绘伪影的对照),播放态 8 帧帧帧不同;灌 `''` 后回到自带 512×512 头像。SMOKE-PASS。冻结首帧是 fork 既有语义(离线省电),内置动图与自带头像行为一致:静止收起时定格首帧,展开/运行/提问时播放。
+
+## 10. Windows 球抢焦点:排除自身窗口、提交后交还前台、截图补光标(2026-09-30)
+
+Windows 上的实测反馈:在浏览器里点球、输入、回车提交后,**Agent 把悬浮球自己当成了"用户正在使用的应用"**——观察边框照着球画。根因两条,叠加才发作:
+
+- Windows 上球是可激活的普通窗口(`packages/helper/src/main.ts`:`focusable: true`,`type: 'panel'` 只在 darwin 设置),点它就把系统前台抢过去,`GetForegroundWindow` 当场变成球的面板。
+- 选观察窗口的逻辑本来就会跳过 overlay —— 但那条排除列表**从没接线**:`packages/host/src/overlay-guard.ts` 里 `withCapture` 一直硬编码 `run({ excludeWindowIds: [] })`。macOS 不需要它(非激活 panel 从不当前台),所以这个缺口一直没暴露;接到 Windows 就表现为"跳过列表为空 → 前台是谁就认谁 → 认成球"。
+
+三处修复,全部按 `win32` 门控,macOS 路径与行为不变。
+
+- **排除自身窗口(主修复)**:helper 新增 `packages/helper/src/chrome-windows.ts`——`windowIdFromHandle(buffer)` 把 Electron 的原生句柄转成与 host 侧 `hwndId()` 同一个数值(指针宽度 → `Number(BigUInt64)`,要求安全整数;两边对不上排除就是空转),`collectChromeWindowIds()` 仅 win32 产出。socket 连上、发完 `hello` 后追加一条 `{type:'chrome-windows', ids:[球,工具条,观察边框]}`(断线重连会重发;窗口是进程级单例,不需要变更推送)。host 侧 `orb.ts` 新增校验(`readWindowIds`:正整数安全整数、≤16 条、**任一条不合法即整条丢弃**,宁可退回"不排除"也不做半份排除)并按 socket 存,`chromeWindowIds()` 取并集,guard transport 新增 `chromeWindowIds?()`,`withCapture` 的两个分支都填入 `run({ excludeWindowIds })`。顺带修掉一个隐藏缺口:HID 区间内的嵌套采集此前恒拿空数组,也就是"点击动作之后的那张复采"仍会认错窗口——现在同样带着排除表。macOS 侧 helper 不上报 → 列表恒空 → 与原行为逐字节一致。
+- **提交后交还前台**:host 新增 `packages/host/src/windows-foreground.ts`(win32-only,koffi 惰性 `createRequire`,与 `tcc.ts` 同一写法):250ms 采样 `GetForegroundWindow`,跳过 chrome 句柄,记住最后一个**非球**的前台窗口。`orb.ts` 在 helper 连上时 `start()`、断开与 `halt()` 时 `stop()`,并在 `onPrompt` 里、`sessionController.prompt` 之前 `restore()`——用与 computer-use `becomeForeground` 同款的 Alt + `SetForegroundWindow`(本进程没收到最后一次输入时 `SetForegroundWindow` 会被忽略,补一次 Alt 转移即可),保证早于 `agent/pre-step` 的首次采集;目标窗口已关闭则静默跳过。只在提交时触发,看历史/点菜单/收起面板都不动前台。
+- **Windows 截图补鼠标光标**(补齐第 4 节的尾巴):macOS 生产路径是 `screencapture -x -C`,由 WindowServer 把真实光标原位烤进图;Windows 的 GDI `BitBlt` 不含光标层,于是 Agent 点偏了无法自查。新增 `packages/computer-use/src/cursor.ts`(纯函数:`cursorDrawPlacement` 按热点换算并留 12px 边界余量、指针更远则不画、光标隐藏不画、空/非有限值一律不画;`resolveCursorAlpha` 优先 alpha 通道、无 alpha 的旧式光标回落 AND mask;`compositeCursor` alpha 混合并裁剪;`flipRows` 行翻转)。`windows-native.ts` 的 `capturePng` 在 `BitBlt` 与 `GetDIBits` 之后合成:`GetCursorInfo`(`CURSOR_SHOWING`)+ `GetIconInfo`(热点 + 两个位图),`GetIconInfo` 交出的两个位图 `DeleteObject` 防 GDI 泄漏,新增 `DSH_CU_CURSORINFO`/`ICONINFO`/`BITMAP` 结构与 x64 布局断言;采集栅格改为翻转成 top-down 后 `encodeBgraPng(bottomUp=false)`。镜像的是 macOS 生产路径(真实光标、原位),不含 SCK 备用路径那圈红白定位环。
+- 测试:computer-use 新增 `cursor.spec.ts` 14 例(热点定位、越界/边距、隐藏光标、DPI 缩放、alpha 混合、mask 回落、行翻转);helper 新增 `chrome-windows.test.ts` 4 例(8/4 字节句柄、0 与非安全整数、平台门控、句柄读取失败);host 新增 `overlay-guard.test.ts` 3 例(句柄流入两个分支、无 helper 时也排除、macOS 式空列表)与 `windows-foreground.test.ts` 4 例(记住用户窗口、忽略 chrome、持续采样与停止、原生调用抛错不致命);`runtime.test.ts` 新增 socket 级用例(上报 → guard 的 `excludeWindowIds`、畸形载荷整条丢弃,harness 补 `provide` 捕获与 overlay 自动 ack 以免等满 1s 超时)。新增 12 个 node:test 用例 + 14 个 vitest 用例,`pnpm typecheck`、`pnpm build` 通过;全量与改动前基线对照:新增用例全过,失败数不变(见下条)。
+- **Windows 实机待验证(本仓库此前零 Windows 实测记录)**:① `getNativeWindowHandle()` 的 HWND 与 `listWindows().hwnd` 是否相等——这条不成立则排除列表空转,需临时打点核对;② `WDA_EXCLUDEFROMCAPTURE` 是否真把球挡在 GDI `BitBlt` 之外(第 5 节的遮蔽机制在 Windows 从未实测),若无效则加 win32 门控的兜底:采集区间直接隐藏 chrome 窗口;③ HID 期间点击穿透是否落在下层窗口、且不把球重新激活;④ 混合 DPI 多屏下光标位置与大小;⑤ 端到端:浏览器在前台 → 点球 → 输入 → 回车 → 观察边框围住浏览器、截图无球、光标可见、前台已交还。
+- **Windows 上既有的测试失败(与本次改动无关,改动前后基线一致,均为环境性)**:`host/tests/preferences.test.ts` 与 `runtime.test.ts` 的 millifraction 用例(win32 默认千分比坐标,测试按 macOS 默认值写)、`client-settings` 的设置页用例(Windows 检出为 CRLF,测试正则按 LF 写)、`bundle` 的装配用例(`symlinkSync` 在 Windows 需要开发者模式/管理员,EPERM)。另 `computer-use` 的 `open.spec.ts`/`tools.spec.ts` 用 POSIX 路径(`/etc`)在 Windows 必失败——后者顺带暴露一个真实缺口:`open_in_finder` 的 `PATH_BLACKLIST` 只有 POSIX 前缀(`open.ts`),Windows 上 `C:\Windows` 这类路径不受护栏保护,且分隔符按 `/` 匹配,留待后续单独处理。

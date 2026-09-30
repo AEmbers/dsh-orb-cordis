@@ -33,6 +33,7 @@ import {
 } from './selection.ts'
 import { pinSessionId } from './services.ts'
 import { selectModelKeepDefault } from './select-model.ts'
+import { createForegroundMemory } from './windows-foreground.ts'
 
 /** Host services the plugin injects. Shapes match the official 0.1.7-rc.2 controllers. */
 export interface OrbContext {
@@ -235,12 +236,22 @@ export class OrbRuntime {
   private helperPid: number | undefined
   private appearance: Appearance = {}
   private readonly overlayWaiters = new Map<string, () => void>()
+  /** Chrome window ids each helper reported, keyed by its socket. */
+  private readonly chromeWindows = new Map<Socket, readonly number[]>()
   private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
   private readonly selection: SelectionController
   private readonly overlay = createOverlayGuard({
     hasHelper: () => this.sockets.size > 0,
     send: (message, signal) => this.waitAck(message, signal),
     setHidInput: (active) => { this.selection.setHidInput(active) },
+    chromeWindowIds: () => this.chromeWindowIds(),
+  })
+  /**
+   * Windows only. Clicking the ball makes it the system foreground window, so the window
+   * the user was actually working in is remembered and handed back on submit.
+   */
+  private readonly foreground = createForegroundMemory({
+    chromeWindowIds: () => this.chromeWindowIds(),
   })
 
   constructor(
@@ -417,9 +428,11 @@ export class OrbRuntime {
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     this.buffers.clear()
+    this.chromeWindows.clear()
     this.helperPid = undefined
     this.overlayWaiters.clear()
     this.selection.stop()
+    this.foreground.stop()
     this.killChild()
   }
 
@@ -489,16 +502,18 @@ export class OrbRuntime {
         if (isPrompt(message)) void this.onPrompt(message.text)
         else if (isQuestionAnswer(message)) this.onQuestionAnswer(message.id, message.answers)
         else if (isQuestionCancel(message)) this.onQuestionCancel(message.id)
-        else this.onControl(message)
+        else this.onControl(message, socket)
       }
     })
     socket.on('close', () => {
       this.sockets.delete(socket)
       this.buffers.delete(socket)
+      this.chromeWindows.delete(socket)
       if (this.sockets.size === 0) {
         this.handQuestionBack()
         this.helperPid = undefined
         this.selection.stop()
+        this.foreground.stop()
       }
     })
     socket.on('error', () => {
@@ -535,6 +550,7 @@ export class OrbRuntime {
     if (this.pending) this.send(socket, this.questionPayload(this.pending.id))
     void this.publishChrome()
     this.selection.sync()
+    this.foreground.start()
   }
 
   private async onPrompt(text: string): Promise<void> {
@@ -553,6 +569,10 @@ export class OrbRuntime {
       return
     }
     try {
+      // Hand the foreground back before the agent's first capture. The user submitted from
+      // the ball, so the ball is the system foreground window right now and the observation
+      // walk would otherwise read it as the app the user is working in.
+      this.foreground.restore()
       const sessionId = await this.ensureSession()
       if (!this.timer) this.syncWatermark()
       this.watch()
@@ -1105,6 +1125,22 @@ export class OrbRuntime {
     for (const socket of this.sockets) this.send(socket, message)
   }
 
+  /**
+   * Every chrome handle the connected helpers reported.
+   * The Windows observation walk skips these, so the ball never becomes the window the
+   * agent believes the user is working in. Empty on macOS, where the ball is a
+   * non-activating panel and the helper reports nothing.
+   */
+  private chromeWindowIds(): readonly number[] {
+    const ids: number[] = []
+    for (const reported of this.chromeWindows.values()) {
+      for (const id of reported) {
+        if (!ids.includes(id)) ids.push(id)
+      }
+    }
+    return ids
+  }
+
   private send(socket: Socket, message: unknown): void {
     try {
       socket.write(`${JSON.stringify(message)}\n`)
@@ -1260,9 +1296,13 @@ export class OrbRuntime {
     this.halt()
   }
 
-  private onControl(message: unknown): void {
+  private onControl(message: unknown, socket: Socket): void {
     const record = asRecord(message)
     if (!record || typeof record.type !== 'string') return
+    if (record.type === 'chrome-windows') {
+      this.chromeWindows.set(socket, readWindowIds(record.ids))
+      return
+    }
     if (record.type === 'overlay-ack' && typeof record.id === 'string') {
       this.overlayWaiters.get(record.id)?.()
       this.overlayWaiters.delete(record.id)
@@ -1512,6 +1552,21 @@ function isPrompt(message: unknown): message is { type: 'prompt'; text: string }
   if (typeof message !== 'object' || message === null) return false
   const record = message as { type?: unknown; text?: unknown }
   return record.type === 'prompt' && typeof record.text === 'string' && record.text.length <= 8000
+}
+
+/**
+ * Chrome window ids from one helper's `chrome-windows` report.
+ * A malformed payload yields no ids, which is the pre-report behaviour: the observation
+ * walk simply excludes nothing.
+ */
+function readWindowIds(value: unknown): readonly number[] {
+  if (!Array.isArray(value) || value.length > 16) return []
+  const ids: number[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'number' || !Number.isSafeInteger(entry) || entry <= 0) return []
+    if (!ids.includes(entry)) ids.push(entry)
+  }
+  return ids
 }
 
 async function readSavedSession(file: string): Promise<string | undefined> {

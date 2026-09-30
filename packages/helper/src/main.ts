@@ -7,6 +7,7 @@ import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { readAvatarChoice, type AvatarChoice } from './avatar.ts'
+import { collectChromeWindowIds, type NativeHandleWindow } from './chrome-windows.ts'
 import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate } from './menu.ts'
 import { attachOverlays, denyWindowPermissions } from './overlays.ts'
@@ -61,7 +62,11 @@ if (process.platform === 'darwin') app.setActivationPolicy?.('accessory')
 
 let win: BrowserWindow | undefined
 let tccWait: ((status: unknown) => void) | undefined
-let overlays: { appearance(payload: { dark: boolean; locale: 'zh' | 'en' }): void; deliver(message: unknown): boolean } | undefined
+let overlays: {
+  appearance(payload: { dark: boolean; locale: 'zh' | 'en' }): void
+  deliver(message: unknown): boolean
+  chromeWindows(): readonly (NativeHandleWindow | undefined)[]
+} | undefined
 let placement: FloatingPlacement | undefined
 let live: Socket | undefined
 let quitting = false
@@ -267,6 +272,10 @@ function connect(attempt: number): void {
     live = socket
     buffer = ''
     socket.write(`${JSON.stringify({ type: 'hello', token, pid: process.pid })}\n`)
+    // The host's observation walk must skip the ball itself, or a click on the ball makes
+    // it the window the agent believes the user is working in.
+    const ids = chromeWindowIds()
+    if (ids.length > 0) write({ type: 'chrome-windows', ids })
   })
   socket.on('data', (chunk: string) => {
     buffer += chunk
@@ -370,6 +379,11 @@ function deliver(message: unknown): void {
     tccWait = undefined
     wait?.((record as { status?: unknown }).status)
   }
+}
+
+/** Ball plus overlays: the windows the host must skip when it picks an observation window. */
+function chromeWindowIds(): number[] {
+  return collectChromeWindowIds([win, ...(overlays?.chromeWindows() ?? [])], process.platform)
 }
 
 function fromBall(event: unknown): boolean {

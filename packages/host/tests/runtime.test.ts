@@ -57,6 +57,7 @@ interface Harness {
   ) => Promise<{ answers: { id: string; selected: string[] }[] }>
   holdPrompt: () => void
   releasePrompt: () => void
+  provided: Map<string, unknown>
 }
 
 function boot(extra: {
@@ -74,6 +75,7 @@ function boot(extra: {
   let releasePrompt = () => {}
   let question: Harness['question'] = async (_request, next) => next()
   let streamListener: ((payload: unknown) => void) | undefined
+  const provided = new Map<string, unknown>()
   const replay: EventRow[] = [
     { type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] } },
     { type: 'user/message', seq: 2, data: { source: { kind: 'notice' }, content: [{ type: 'text', text: '跳过' }] } },
@@ -161,7 +163,9 @@ function boot(extra: {
       }
       return undefined
     },
-    provide() {},
+    provide(name: string, value: unknown) {
+      provided.set(name, value)
+    },
     on(name: string, listener: (payload: unknown) => void, options?: { prepend?: boolean; global?: boolean }) {
       if (name === 'user-questions/request') {
         assert.equal(options?.prepend, true)
@@ -200,6 +204,7 @@ function boot(extra: {
       promptGate = new Promise((resolve) => { releasePrompt = resolve })
     },
     releasePrompt() { releasePrompt() },
+    provided,
   }
 }
 
@@ -215,7 +220,12 @@ async function connect(runtime: OrbRuntime) {
     buffer = parts.pop() ?? ''
     for (const part of parts) {
       if (!part.trim()) continue
-      messages.push(JSON.parse(part) as Record<string, unknown>)
+      const message = JSON.parse(part) as Record<string, unknown>
+      messages.push(message)
+      // Stand in for the helper's overlay ack, so a guard interval does not wait out its timeout.
+      if (typeof message.type === 'string' && message.type.startsWith('overlay-') && typeof message.id === 'string') {
+        socket.write(`${JSON.stringify({ type: 'overlay-ack', id: message.id })}\n`)
+      }
     }
   })
   await once(socket, 'connect')
@@ -288,6 +298,39 @@ describe('ball control socket', { concurrency: 1 }, () => {
       client.send({ type: 'open', sessionId: 'not-a-session' })
       await new Promise((resolve) => setTimeout(resolve, 40))
       assert.equal(harness.calls.create.length, creates)
+    } finally {
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
+  it('skips the helper chrome windows the helper reports', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      const guard = harness.provided.get('computerUseOverlayGuard') as {
+        withCapture<T>(run: (session: { excludeWindowIds: readonly number[] }) => Promise<T>): Promise<T>
+      }
+      const exclusion = async (): Promise<readonly number[]> => {
+        let ids: readonly number[] = []
+        await guard.withCapture(async (session) => { ids = session.excludeWindowIds })
+        return ids
+      }
+      const until = async (want: readonly number[]): Promise<void> => {
+        const start = Date.now()
+        for (;;) {
+          const got = await exclusion()
+          if (JSON.stringify(got) === JSON.stringify(want)) return
+          if (Date.now() - start > 2000) throw new Error(`exclusion ids stayed ${JSON.stringify(got)}`)
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+      }
+      assert.deepEqual(await exclusion(), [])
+      client.send({ type: 'chrome-windows', ids: [11, 22, 11] })
+      await until([11, 22])
+      // One bad entry drops the whole report: a partial list would leave some chrome skippable.
+      client.send({ type: 'chrome-windows', ids: [11, -1] })
+      await until([])
     } finally {
       client.socket.end()
       harness.runtime.halt()

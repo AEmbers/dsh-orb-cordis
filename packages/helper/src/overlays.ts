@@ -6,6 +6,7 @@
 
 import { BrowserWindow, ipcMain, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
+import type { NativeHandleWindow } from './chrome-windows.ts'
 import { createAgentCloak, scheduleCloakAck } from './cloak.ts'
 import {
   observationFrameCssScript,
@@ -37,6 +38,8 @@ export function denyWindowPermissions(created: BrowserWindow): void {
 export async function attachOverlays(deps: OverlayDeps): Promise<{
   appearance(payload: OverlayAppearance): void
   deliver(message: unknown): boolean
+  /** Toolbar and observation frame, for the host's capture exclusion list. */
+  chromeWindows(): readonly (NativeHandleWindow | undefined)[]
 }> {
   const preload = fileURLToPath(new URL('../selection-preload.cjs', import.meta.url))
   const toolbar = openToolbar(preload)
@@ -110,6 +113,9 @@ export async function attachOverlays(deps: OverlayDeps): Promise<{
     /** Mirror the ball's theme and UI language onto the selection toolbar. */
     appearance(payload: OverlayAppearance): void {
       if (!toolbar.isDestroyed()) toolbar.webContents.send('orb:appearance', payload)
+    },
+    chromeWindows(): readonly (NativeHandleWindow | undefined)[] {
+      return [toolbar, frame]
     },
     deliver(message: unknown): boolean {
       if (typeof message !== 'object' || message === null) return false

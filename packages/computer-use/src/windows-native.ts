@@ -10,6 +10,7 @@
 
 import { execFileSync } from 'node:child_process'
 import koffi from 'koffi'
+import { compositeCursor, cursorDrawPlacement, flipRows, resolveCursorAlpha } from './cursor.ts'
 import type { WindowsDesktopSnapshot, WindowsWindowFact } from './windows-foreground.ts'
 import { encodeBgraPng, type WindowsDesktopOps, type WindowsRect } from './windows.ts'
 
@@ -47,6 +48,8 @@ const DWMWA_CLOAKED = 14
 const MONITOR_DEFAULTTONEAREST = 2
 const MDT_EFFECTIVE_DPI = 0
 const VK_MENU = 0x12
+/** `CURSORINFO.flags` bit set while the pointer is drawn. */
+const CURSOR_SHOWING = 0x0001
 /** Per-monitor v2, then per-monitor. `SetThreadDpiAwarenessContext` returns NULL when the context is unsupported. */
 const DPI_PER_MONITOR_V2 = -4
 const DPI_PER_MONITOR = -3
@@ -103,6 +106,32 @@ const INPUT_UNION = koffi.union('DSH_CU_INPUT_UNION', {
 const INPUT = koffi.struct('DSH_CU_INPUT', {
   type: 'uint32',
   u: INPUT_UNION,
+})
+
+const CURSORINFO = koffi.struct('DSH_CU_CURSORINFO', {
+  cbSize: 'uint32',
+  flags: 'uint32',
+  hCursor: 'void *',
+  ptScreenPos: POINT,
+})
+
+const ICONINFO = koffi.struct('DSH_CU_ICONINFO', {
+  fIcon: 'int32',
+  xHotspot: 'uint32',
+  yHotspot: 'uint32',
+  hbmMask: 'void *',
+  hbmColor: 'void *',
+})
+
+/** `tagBITMAP`; only `bmWidth` and `bmHeight` are read. */
+const BITMAP = koffi.struct('DSH_CU_BITMAP', {
+  bmType: 'int32',
+  bmWidth: 'int32',
+  bmHeight: 'int32',
+  bmWidthBytes: 'int32',
+  bmPlanes: 'uint16',
+  bmBitsPixel: 'uint16',
+  bmBits: 'void *',
 })
 
 void RECT
@@ -178,6 +207,8 @@ function bind(libraries: NativeBindings): {
   GetSystemMetrics: (index: number) => number
   GetCursorPos: (point: NativePoint) => number
   SetCursorPos: (x: number, y: number) => number
+  GetCursorInfo: (info: Buffer) => number
+  GetIconInfo: (cursor: unknown, info: Buffer) => number
   SetThreadDpiAwarenessContext: ((context: DpiContext) => unknown) | undefined
   GetDpiForMonitor: ((monitor: unknown, type: number, dpiX: number[], dpiY: number[]) => number) | undefined
   GetDC: (hwnd: unknown) => unknown
@@ -197,6 +228,7 @@ function bind(libraries: NativeBindings): {
   ) => number
   DeleteObject: (object: unknown) => number
   DeleteDC: (hdc: unknown) => number
+  GetObjectW: (handle: unknown, size: number, info: Buffer) => number
   SendInput: (count: number, inputs: unknown[], size: number) => number
   OpenClipboard: (hwnd: unknown) => number
   EmptyClipboard: () => number
@@ -260,6 +292,8 @@ function bind(libraries: NativeBindings): {
     GetSystemMetrics: user32.func('int __stdcall GetSystemMetrics(int nIndex)'),
     GetCursorPos: user32.func('int __stdcall GetCursorPos(_Out_ DSH_CU_POINT *lpPoint)'),
     SetCursorPos: user32.func('int __stdcall SetCursorPos(int X, int Y)'),
+    GetCursorInfo: user32.func('int __stdcall GetCursorInfo(_Inout_ uint8_t *pci)'),
+    GetIconInfo: user32.func('int __stdcall GetIconInfo(void *hIcon, _Out_ uint8_t *piconinfo)'),
     SetThreadDpiAwarenessContext: setThreadDpi,
     GetDpiForMonitor: getDpiForMonitor,
     GetDC: user32.func('void * __stdcall GetDC(void *hWnd)'),
@@ -276,6 +310,7 @@ function bind(libraries: NativeBindings): {
     ),
     DeleteObject: gdi32.func('int __stdcall DeleteObject(void *ho)'),
     DeleteDC: gdi32.func('int __stdcall DeleteDC(void *hdc)'),
+    GetObjectW: gdi32.func('int __stdcall GetObjectW(void *h, int c, _Out_ uint8_t *pv)'),
     SendInput: user32.func('uint32 __stdcall SendInput(uint32 cInputs, DSH_CU_INPUT *pInputs, int cbSize)'),
     OpenClipboard: user32.func('int __stdcall OpenClipboard(void *hWndNewOwner)'),
     EmptyClipboard: user32.func('int __stdcall EmptyClipboard()'),
@@ -518,6 +553,112 @@ function cloaked(api: Bindings, hwnd: unknown): boolean {
   return flag.readUInt32LE(0) !== 0
 }
 
+function bitmapSize(api: Bindings, bitmap: unknown): { width: number; height: number } | undefined {
+  const info = Buffer.alloc(BITMAP.size)
+  if (api.GetObjectW(bitmap, BITMAP.size, info) === 0) return undefined
+  const decoded = koffi.decode(info, BITMAP) as { bmWidth: number; bmHeight: number }
+  if (decoded.bmWidth <= 0 || decoded.bmHeight <= 0) return undefined
+  return { width: decoded.bmWidth, height: decoded.bmHeight }
+}
+
+/** Read one bitmap as top-down 32-bit BGRA. `GetDIBits` converts depth and row order for us. */
+function bitmapPixels(
+  api: Bindings,
+  dc: unknown,
+  bitmap: unknown,
+  size: { width: number; height: number },
+): Buffer | undefined {
+  const rowBytes = size.width * 4
+  const pixels = Buffer.alloc(rowBytes * size.height)
+  const header = {
+    biSize: 40,
+    biWidth: size.width,
+    biHeight: size.height,
+    biPlanes: 1,
+    biBitCount: 32,
+    biCompression: 0,
+    biSizeImage: pixels.length,
+    biXPelsPerMeter: 0,
+    biYPelsPerMeter: 0,
+    biClrUsed: 0,
+    biClrImportant: 0,
+  }
+  if (api.GetDIBits(dc, bitmap, 0, size.height, pixels, header, 0) === 0) return undefined
+  flipRows(pixels, rowBytes, size.height)
+  return pixels
+}
+
+interface NativeCursor {
+  readonly pointer: NativePoint
+  readonly hotspot: NativePoint
+  readonly color: unknown
+  readonly mask: unknown
+}
+
+/**
+ * The system pointer as Win32 reports it.
+ * `GetIconInfo` hands over two bitmaps the caller owns; the shared cursor handle is not ours to free.
+ * @returns position, hotspot, and bitmaps, or undefined when no pointer is drawn.
+ */
+function readCursor(api: Bindings): NativeCursor | undefined {
+  const info = Buffer.alloc(CURSORINFO.size)
+  info.writeUInt32LE(CURSORINFO.size, 0)
+  if (api.GetCursorInfo(info) === 0) return undefined
+  const cursor = koffi.decode(info, CURSORINFO) as { flags: number; hCursor: unknown; ptScreenPos: NativePoint }
+  if ((cursor.flags & CURSOR_SHOWING) === 0 || isNull(cursor.hCursor)) return undefined
+  const icon = Buffer.alloc(ICONINFO.size)
+  if (api.GetIconInfo(cursor.hCursor, icon) === 0) return undefined
+  const decoded = koffi.decode(icon, ICONINFO) as {
+    xHotspot: number
+    yHotspot: number
+    hbmMask: unknown
+    hbmColor: unknown
+  }
+  return {
+    pointer: { x: cursor.ptScreenPos.x, y: cursor.ptScreenPos.y },
+    hotspot: { x: decoded.xHotspot, y: decoded.yHotspot },
+    color: decoded.hbmColor,
+    mask: decoded.hbmMask,
+  }
+}
+
+/**
+ * Draw the system pointer into one capture raster.
+ * `BitBlt` copies the desktop without the cursor layer, so the agent cannot see where its
+ * clicks land. macOS gets the same pointer baked in by `screencapture -x -C`.
+ * @param bounds - capture region in physical pixels, matching the raster origin.
+ */
+function drawCursor(
+  api: Bindings,
+  dc: unknown,
+  pixels: Buffer,
+  width: number,
+  height: number,
+  bounds: WindowsRect,
+): void {
+  const cursor = readCursor(api)
+  if (cursor === undefined) return
+  try {
+    const size = bitmapSize(api, cursor.color)
+    if (size === undefined) return
+    const placement = cursorDrawPlacement(cursor.pointer, cursor.hotspot, size, bounds)
+    if (placement === undefined) return
+    const color = bitmapPixels(api, dc, cursor.color, size)
+    if (color === undefined) return
+    const mask = isNull(cursor.mask) ? undefined : bitmapPixels(api, dc, cursor.mask, size)
+    const resolved = resolveCursorAlpha({
+      width: size.width,
+      height: size.height,
+      color,
+      ...mask === undefined ? {} : { mask },
+    })
+    compositeCursor(pixels, width, height, resolved, size.width, size.height, placement)
+  } finally {
+    if (!isNull(cursor.color)) api.DeleteObject(cursor.color)
+    if (!isNull(cursor.mask)) api.DeleteObject(cursor.mask)
+  }
+}
+
 function monitorOf(api: Bindings, hwnd: unknown, fallback: WindowsRect): { monitor: WindowsRect; dpi: number } {
   const handle = api.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
   if (isNull(handle)) return { monitor: fallback, dpi: 96 }
@@ -562,6 +703,9 @@ function cachedAppName(api: Bindings, cache: Map<number, string>, pid: number): 
 export function createProductionWindowsOps(): WindowsDesktopOps {
   if (process.arch === 'x64' && INPUT.size !== 40) {
     throw new Error(`computer-use: INPUT size ${String(INPUT.size)} is not 40`)
+  }
+  if (process.arch === 'x64' && (CURSORINFO.size !== 24 || ICONINFO.size !== 32 || BITMAP.size !== 32)) {
+    throw new Error('computer-use: cursor structs are not laid out for x64')
   }
   const libraries: NativeBindings = {
     user32: koffi.load('user32.dll'),
@@ -672,13 +816,16 @@ export function createProductionWindowsOps(): WindowsDesktopOps {
       return perMonitor(() => {
         const width = Math.max(1, Math.round(bounds.width))
         const height = Math.max(1, Math.round(bounds.height))
+        const originX = Math.round(bounds.x)
+        const originY = Math.round(bounds.y)
+        const region: WindowsRect = { x: originX, y: originY, width, height }
         const screenDc = api.GetDC(null)
         if (isNull(screenDc)) throw new Error('computer-use: screen capture failed')
         const memory = api.CreateCompatibleDC(screenDc)
         const bitmap = api.CreateCompatibleBitmap(screenDc, width, height)
         const previous = api.SelectObject(memory, bitmap)
         try {
-          if (api.BitBlt(memory, 0, 0, width, height, screenDc, Math.round(bounds.x), Math.round(bounds.y), SRCCOPY) === 0) {
+          if (api.BitBlt(memory, 0, 0, width, height, screenDc, originX, originY, SRCCOPY) === 0) {
             throw new Error('computer-use: screen capture failed')
           }
           const header = {
@@ -698,7 +845,9 @@ export function createProductionWindowsOps(): WindowsDesktopOps {
           if (api.GetDIBits(memory, bitmap, 0, height, pixels, header, 0) === 0) {
             throw new Error('computer-use: screen capture failed')
           }
-          return encodeBgraPng(width, height, pixels, true)
+          flipRows(pixels, width * 4, height)
+          drawCursor(api, memory, pixels, width, height, region)
+          return encodeBgraPng(width, height, pixels, false)
         } finally {
           api.SelectObject(memory, previous)
           api.DeleteObject(bitmap)
