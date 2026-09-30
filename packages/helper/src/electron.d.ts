@@ -33,6 +33,7 @@ declare module 'electron' {
     showInactive(): void
     hide(): void
     setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void
+    blur(): void
     once(event: 'ready-to-show', listener: () => void): void
     on(event: 'closed', listener: () => void): void
     webContents: WebContents

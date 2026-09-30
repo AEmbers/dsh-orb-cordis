@@ -170,8 +170,8 @@ describe('windows selection dispatch', () => {
 })
 
 describe('overlay guard', () => {
-  it('captures with an empty exclude list and does not call the helper', async () => {
-    const sent: unknown[] = []
+  it('wraps captures in overlay-capture intervals when the helper is attached', async () => {
+    const sent: { type?: unknown; active?: unknown }[] = []
     const guard = createOverlayGuard({
       hasHelper: () => true,
       send: async (message) => { sent.push(message) },
@@ -180,7 +180,64 @@ describe('overlay guard', () => {
     })
     const session = await guard.withCapture(async (value) => value)
     assert.deepEqual(session.excludeWindowIds, [])
+    assert.deepEqual(sent.map((message) => [message.type, message.active]), [
+      ['overlay-capture', true],
+      ['overlay-capture', false],
+    ])
+  })
+
+  it('captures without helper messages when no helper is attached', async () => {
+    const sent: unknown[] = []
+    const guard = createOverlayGuard({
+      hasHelper: () => false,
+      send: async (message) => { sent.push(message) },
+      setHidInput() {},
+      sleep: async () => {},
+    })
+    await guard.withCapture(async (value) => value)
     assert.deepEqual(sent, [])
+  })
+
+  it('does not send capture intervals nested inside an input cloak', async () => {
+    const sent: { type?: unknown; active?: unknown }[] = []
+    const pending = new Map<string, () => void>()
+    const guard = createOverlayGuard({
+      hasHelper: () => true,
+      send: (message) => {
+        sent.push(message)
+        if (message.type === 'overlay-input' && message.active === true) {
+          return new Promise((resolve) => { pending.set(message.id, resolve) })
+        }
+        return Promise.resolve()
+      },
+      setHidInput() {},
+      sleep: async () => {},
+    })
+    const input = guard.withInput(async () => guard.withCapture(async () => 'inside'))
+    await waitFor(() => sent.length === 1)
+    assert.equal(sent[0]?.type, 'overlay-input')
+    pending.get(sentId(sent, 0))?.()
+    assert.equal(await input, 'inside')
+    assert.deepEqual(sent.map((message) => message.type), ['overlay-input', 'overlay-input'])
+  })
+
+  it('still sends capture end when the run aborts after the begin ack', async () => {
+    const sent: { type?: unknown; active?: unknown }[] = []
+    const guard = createOverlayGuard({
+      hasHelper: () => true,
+      send: async (message) => { sent.push(message) },
+      setHidInput() {},
+      sleep: async () => {},
+    })
+    await assert.rejects(
+      guard.withCapture(async () => {
+        throw new Error('capture failed')
+      }),
+    )
+    assert.deepEqual(sent.map((message) => [message.type, message.active]), [
+      ['overlay-capture', true],
+      ['overlay-capture', false],
+    ])
   })
 
   it('waits for click-through and observation-frame acks, and toggles nested input once', async () => {

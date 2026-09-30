@@ -458,6 +458,63 @@ function contextMenuTemplate(state, zh, actions) {
 		}
 	];
 }
+/**
+* Fire a cloak ack. Input begin waits {@link OVERLAY_GUARD_INPUT_APPLY_MS} after
+* click-through was applied — the ack arriving is the host's signal that posted
+* HID events may start. Every other transition acks immediately.
+*/
+function scheduleCloakAck(ack, mode, action) {
+	if (mode !== "input" || action !== "begin") {
+		ack();
+		return;
+	}
+	setTimeout(ack, 80).unref();
+}
+/**
+* Create the cloak. `clickThroughWindow` is the ball: it receives
+* `setIgnoreMouseEvents`/`blur` on input-count crossings, chrome windows do not.
+*/
+function createAgentCloak(entries, clickThroughWindow) {
+	const counts = {
+		capture: 0,
+		input: 0
+	};
+	let clickThrough = false;
+	function sync() {
+		const active = counts.capture > 0 || counts.input > 0;
+		for (const entry of entries) {
+			const window = entry.window();
+			if (window === void 0 || window.isDestroyed()) continue;
+			window.setContentProtection(active || entry.resting);
+		}
+		const next = counts.input > 0;
+		if (next === clickThrough) return;
+		clickThrough = next;
+		const ball = clickThroughWindow?.();
+		if (ball === void 0 || ball.isDestroyed()) return;
+		if (next) {
+			ball.setIgnoreMouseEvents(true, { forward: false });
+			ball.blur();
+			return;
+		}
+		ball.setIgnoreMouseEvents(false);
+	}
+	return {
+		begin(mode) {
+			counts[mode] += 1;
+			sync();
+		},
+		end(mode) {
+			counts[mode] = Math.max(0, counts[mode] - 1);
+			sync();
+		},
+		reset() {
+			counts.capture = 0;
+			counts.input = 0;
+			sync();
+		}
+	};
+}
 //#endregion
 //#region src/overlay-geometry.ts
 /** Toolbar and observation-frame placement. No Electron import, so tests can run the same math. */
@@ -579,7 +636,8 @@ function pointInRect(point, bounds) {
 //#region src/overlays.ts
 /**
 * Selection toolbar and observation frame.
-* Both windows, like the ball, opt out of screen capture.
+* Agent chrome rests captureable; the refcounted cloak below lifts it out of
+* captures while a Computer Use capture or HID interval is active.
 */
 function denyWindowPermissions(created) {
 	created.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
@@ -625,6 +683,26 @@ async function attachOverlays(deps) {
 	function hideToolbar() {
 		if (!toolbar.isDestroyed() && toolbar.isVisible()) toolbar.hide();
 	}
+	/**
+	* The refcounted cloak from ./cloak.ts. Chrome windows rest captureable; each
+	* `overlay-capture`/`overlay-input` interval lifts them out of screen captures,
+	* and the observation frame keeps its Windows resting protection (it stays
+	* visible around the observed region between captures).
+	*/
+	const cloak = createAgentCloak([
+		{
+			window: () => deps.ball(),
+			resting: false
+		},
+		{
+			window: () => toolbar,
+			resting: false
+		},
+		{
+			window: () => frame,
+			resting: process.platform === "win32"
+		}
+	], () => deps.ball());
 	function raiseChrome() {
 		if (!frame.isDestroyed()) frame.setAlwaysOnTop(true, "floating");
 		if (!toolbar.isDestroyed()) toolbar.setAlwaysOnTop(true, "screen-saver");
@@ -683,14 +761,18 @@ async function attachOverlays(deps) {
 			hideToolbar();
 			return true;
 		}
-		if (record.type === "overlay-input") {
-			const ball = deps.ball();
-			if (ball && !ball.isDestroyed()) {
-				if (record.active === true) ball.setIgnoreMouseEvents(true, { forward: true });
-				else ball.setIgnoreMouseEvents(false);
-			}
-			if (record.active === true) hideToolbar();
+		if (record.type === "overlay-capture") {
+			if (record.active === false) cloak.end("capture");
+			else cloak.begin("capture");
 			ack(record.id);
+			return true;
+		}
+		if (record.type === "overlay-input") {
+			const begin = record.active === true;
+			if (begin) hideToolbar();
+			if (begin) cloak.begin("input");
+			else cloak.end("input");
+			scheduleCloakAck(() => ack(record.id), "input", begin ? "begin" : "end");
 			return true;
 		}
 		if (record.type === "observation-frame") {
@@ -828,12 +910,12 @@ function openFrame() {
 		}
 	});
 	protect(created, "floating");
+	if (process.platform === "win32") created.setContentProtection(true);
 	denyWindowPermissions(created);
 	created.setIgnoreMouseEvents(true, { forward: true });
 	return created;
 }
 function protect(created, level) {
-	if (process.platform === "win32") created.setContentProtection(true);
 	created.setAlwaysOnTop(true, level);
 	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
 		visibleOnFullScreen: true,
@@ -1036,7 +1118,6 @@ function openWindow() {
 			sandbox: true
 		}
 	});
-	if (process.platform === "win32") created.setContentProtection(true);
 	denyWindowPermissions(created);
 	created.setAlwaysOnTop(true, "screen-saver");
 	if (process.platform === "darwin") created.setVisibleOnAllWorkspaces(true, {
@@ -1060,7 +1141,6 @@ function openWindow() {
 	});
 	created.once("ready-to-show", () => {
 		created.showInactive();
-		if (process.platform === "win32") created.setContentProtection(true);
 		const shown = created.getBounds();
 		console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`);
 	});

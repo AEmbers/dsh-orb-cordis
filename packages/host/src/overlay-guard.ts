@@ -1,13 +1,17 @@
 /**
  * Computer Use overlay cloak.
- * Capture stays on screencapture: the exclude list is always empty.
- * Clicks pass through the ball, and the observation frame is shown before the next capture.
+ * Every capture runs inside an `overlay-capture` interval: the helper lifts the ball,
+ * toolbar, and observation frame out of screen captures for the interval, so the agent
+ * never sees its own chrome. HID bursts keep the `overlay-input` interval, which also
+ * holds the protection across the post-action screenshot inside the burst.
  */
 
 import { randomUUID } from 'node:crypto'
 
 export const OVERLAY_GUARD_ACK_TIMEOUT_MS = 1_000
 export const OVERLAY_GUARD_INPUT_DRAIN_MS = 80
+/** Milliseconds to let the helper's protection switch reach WindowServer/WDA before the capture reads the screen. */
+export const OVERLAY_GUARD_CAPTURE_SETTLE_MS = 50
 
 export interface OverlayRect {
   readonly x: number
@@ -32,11 +36,37 @@ function delay(ms: number): Promise<void> {
 
 export function createOverlayGuard(transport: OverlayGuardTransport) {
   let inputDepth = 0
+  let captureDepth = 0
   const sleep = transport.sleep ?? delay
 
   return {
-    async withCapture<T>(run: (session: { excludeWindowIds: readonly number[] }) => Promise<T>): Promise<T> {
-      return run({ excludeWindowIds: [] })
+    async withCapture<T>(
+      run: (session: { excludeWindowIds: readonly number[] }) => Promise<T>,
+      signal?: AbortSignal,
+    ): Promise<T> {
+      captureDepth += 1
+      // Inside an input cloak the helper already protects every chrome window for the
+      // whole burst, so a nested capture interval would only add round-trips and settle.
+      const cloaked = captureDepth === 1 && inputDepth === 0 && transport.hasHelper()
+      let sentBegin = false
+      try {
+        if (cloaked) {
+          const begin = transport.send({ type: 'overlay-capture', id: randomUUID(), active: true }, signal)
+          sentBegin = true
+          await begin
+          await sleep(OVERLAY_GUARD_CAPTURE_SETTLE_MS)
+        }
+        return await run({ excludeWindowIds: [] })
+      } finally {
+        captureDepth -= 1
+        if (sentBegin) {
+          try {
+            await transport.send({ type: 'overlay-capture', id: randomUUID(), active: false })
+          } catch {
+            // Helper already gone; it quits on disconnect and restarts unprotected.
+          }
+        }
+      }
     },
 
     async withInput<T>(run: () => Promise<T>): Promise<T> {

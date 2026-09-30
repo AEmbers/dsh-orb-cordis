@@ -1087,10 +1087,35 @@ function delay(ms) {
 }
 function createOverlayGuard(transport) {
 	let inputDepth = 0;
+	let captureDepth = 0;
 	const sleep = transport.sleep ?? delay;
 	return {
-		async withCapture(run) {
-			return run({ excludeWindowIds: [] });
+		async withCapture(run, signal) {
+			captureDepth += 1;
+			const cloaked = captureDepth === 1 && inputDepth === 0 && transport.hasHelper();
+			let sentBegin = false;
+			try {
+				if (cloaked) {
+					const begin = transport.send({
+						type: "overlay-capture",
+						id: randomUUID(),
+						active: true
+					}, signal);
+					sentBegin = true;
+					await begin;
+					await sleep(50);
+				}
+				return await run({ excludeWindowIds: [] });
+			} finally {
+				captureDepth -= 1;
+				if (sentBegin) try {
+					await transport.send({
+						type: "overlay-capture",
+						id: randomUUID(),
+						active: false
+					});
+				} catch {}
+			}
 		},
 		async withInput(run) {
 			inputDepth += 1;

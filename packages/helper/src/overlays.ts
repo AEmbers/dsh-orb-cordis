@@ -1,10 +1,12 @@
 /**
  * Selection toolbar and observation frame.
- * Both windows, like the ball, opt out of screen capture.
+ * Agent chrome rests captureable; the refcounted cloak below lifts it out of
+ * captures while a Computer Use capture or HID interval is active.
  */
 
 import { BrowserWindow, ipcMain, screen } from 'electron'
 import { fileURLToPath } from 'node:url'
+import { createAgentCloak, scheduleCloakAck } from './cloak.ts'
 import {
   observationFrameCssScript,
   observationFramePlacement,
@@ -73,6 +75,21 @@ export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(messa
     if (!toolbar.isDestroyed() && toolbar.isVisible()) toolbar.hide()
   }
 
+  /**
+   * The refcounted cloak from ./cloak.ts. Chrome windows rest captureable; each
+   * `overlay-capture`/`overlay-input` interval lifts them out of screen captures,
+   * and the observation frame keeps its Windows resting protection (it stays
+   * visible around the observed region between captures).
+   */
+  const cloak = createAgentCloak(
+    [
+      { window: () => deps.ball(), resting: false },
+      { window: () => toolbar, resting: false },
+      { window: () => frame, resting: process.platform === 'win32' },
+    ],
+    () => deps.ball(),
+  )
+
   function raiseChrome(): void {
     if (!frame.isDestroyed()) frame.setAlwaysOnTop(true, 'floating')
     if (!toolbar.isDestroyed()) toolbar.setAlwaysOnTop(true, 'screen-saver')
@@ -132,14 +149,20 @@ export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(messa
         hideToolbar()
         return true
       }
-      if (record.type === 'overlay-input') {
-        const ball = deps.ball()
-        if (ball && !ball.isDestroyed()) {
-          if (record.active === true) ball.setIgnoreMouseEvents(true, { forward: true })
-          else ball.setIgnoreMouseEvents(false)
-        }
-        if (record.active === true) hideToolbar()
+      if (record.type === 'overlay-capture') {
+        if (record.active === false) cloak.end('capture')
+        else cloak.begin('capture')
         ack(record.id)
+        return true
+      }
+      if (record.type === 'overlay-input') {
+        const begin = record.active === true
+        if (begin) hideToolbar()
+        if (begin) cloak.begin('input')
+        else cloak.end('input')
+        // The input-begin ack doubles as the host's green light for posted HID
+        // events; hold it until WindowServer has committed the click-through.
+        scheduleCloakAck(() => ack(record.id), 'input', begin ? 'begin' : 'end')
         return true
       }
       if (record.type === 'observation-frame') {
@@ -271,15 +294,16 @@ function openFrame(): BrowserWindow {
     },
   })
   protect(created, 'floating')
+  // The frame stays visible around the observed region between captures; on Windows it
+  // rests out of captures (WDA_EXCLUDEFROMCAPTURE), matching the original observation frame.
+  if (process.platform === 'win32') created.setContentProtection(true)
   denyWindowPermissions(created)
   created.setIgnoreMouseEvents(true, { forward: true })
   return created
 }
 
 function protect(created: BrowserWindow, level: 'screen-saver' | 'floating'): void {
-  // macOS 上开启内容保护会把窗口从截图/录屏里抹掉（NSWindowSharingNone），
-  // 原版悬浮球只在 Windows 采集期间开启，这里保持一致。
-  if (process.platform === 'win32') created.setContentProtection(true)
+  // 内容保护由 cloak.ts 按 capture/input 区间动态开关；平时保持可截图/可录屏。
   created.setAlwaysOnTop(true, level)
   if (process.platform === 'darwin') {
     created.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })

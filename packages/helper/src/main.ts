@@ -201,7 +201,8 @@ function openWindow(): BrowserWindow {
       sandbox: true,
     },
   })
-  if (process.platform === 'win32') created.setContentProtection(true)
+  // The ball rests captureable; overlays.ts syncCloak lifts it out of captures
+  // for the duration of each Computer Use capture or HID interval.
   denyWindowPermissions(created)
   created.setAlwaysOnTop(true, 'screen-saver')
   if (process.platform === 'darwin') {
@@ -222,7 +223,6 @@ function openWindow(): BrowserWindow {
   })
   created.once('ready-to-show', () => {
     created.showInactive()
-    if (process.platform === 'win32') created.setContentProtection(true)
     const shown = created.getBounds()
     console.error(`dsh-orb helper: ball ${shown.x},${shown.y} ${shown.width}x${shown.height}`)
   })
