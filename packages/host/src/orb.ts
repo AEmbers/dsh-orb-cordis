@@ -141,6 +141,16 @@ interface ToolDetail {
   readonly cwd: string
 }
 
+/** Provider-reported token counts of one settled assistant message. */
+interface BlockUsage {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly totalTokens?: number
+  readonly cacheReadTokens?: number
+  readonly cacheWriteTokens?: number
+  readonly reasoningTokens?: number
+}
+
 interface BlockMessage {
   readonly type: 'block'
   readonly key: string
@@ -151,6 +161,7 @@ interface BlockMessage {
   /** Part of the turn's final answer: the only text a folded turn keeps visible. */
   readonly response?: true
   readonly detail?: ToolDetail
+  readonly usage?: BlockUsage
 }
 
 interface PendingQuestion {
@@ -800,6 +811,7 @@ export class OrbRuntime {
     if (!record) return
     const turn = numberOf(record.turn)
     const step = numberOf(record.step)
+    const usage = readUsage(record.usage)
     if (record.interrupted === true) this.turnInterrupted = true
     // Only the newest settled message is the final answer; demote the previous one.
     const previous = this.responseKeys
@@ -841,6 +853,12 @@ export class OrbRuntime {
       cursor += 1
     }
     this.responseKeys = writtenKeys
+    // The usage meter rides on the message's closing reply block, as in Harness.
+    if (usage !== undefined) {
+      const last = [...writtenKeys].reverse().find((key) => this.blocks.get(key)?.kind === 'assistant')
+      const settled = last === undefined ? undefined : this.blocks.get(last)
+      if (last !== undefined && settled) this.block(last, settled.kind, settled.text, false, 'set', undefined, usage)
+    }
   }
 
   /** Remove one block everywhere: map, order, and the ball's DOM. */
@@ -925,6 +943,7 @@ export class OrbRuntime {
     running: boolean,
     mode: 'set' | 'append',
     detail?: Partial<ToolDetail>,
+    usage?: BlockUsage,
   ): void {
     const previous = this.blocks.get(key)
     const previousText = previous?.text ?? ''
@@ -942,11 +961,13 @@ export class OrbRuntime {
       ...mergedDetail,
       ...(mergedDetail.error === undefined ? {} : { error: mergedDetail.error }),
     }
+    const mergedUsage = usage === undefined ? previous?.usage : usage
     const message: BlockMessage = {
       type: 'block', key, kind, text: next, running,
       ...(this.turnInterrupted && kind === 'assistant' && !running ? { interrupted: true } : {}),
       ...(this.responseKeys.includes(key) ? { response: true as const } : {}),
       ...(merged === undefined ? {} : { detail: merged }),
+      ...(mergedUsage === undefined ? {} : { usage: mergedUsage }),
     }
     if (!this.blocks.has(key)) {
       this.blockOrder.push(key)
@@ -1571,6 +1592,27 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function numberOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/** Validate the provider token-usage payload of an `assistant/message` event. */
+function readUsage(value: unknown): BlockUsage | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  const count = (raw: unknown): number | undefined => {
+    const number = typeof raw === 'number' ? raw : NaN
+    return Number.isFinite(number) && number >= 0 ? number : undefined
+  }
+  const inputTokens = count(record.inputTokens)
+  const outputTokens = count(record.outputTokens)
+  if (inputTokens === undefined || outputTokens === undefined) return undefined
+  return {
+    inputTokens,
+    outputTokens,
+    ...(count(record.totalTokens) === undefined ? {} : { totalTokens: count(record.totalTokens) }),
+    ...(count(record.cacheReadTokens) === undefined ? {} : { cacheReadTokens: count(record.cacheReadTokens) }),
+    ...(count(record.cacheWriteTokens) === undefined ? {} : { cacheWriteTokens: count(record.cacheWriteTokens) }),
+    ...(count(record.reasoningTokens) === undefined ? {} : { reasoningTokens: count(record.reasoningTokens) }),
+  }
 }
 
 function partKind(part: Record<string, unknown> | undefined): BlockMessage['kind'] | undefined {

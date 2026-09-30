@@ -37,6 +37,54 @@
   overflow-wrap: anywhere;
 }
 
+/* ----- Message actions (MessageIconActions: copy / turn-usage pill) ----- */
+
+.user-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -2px;
+}
+
+.am-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -4px;
+}
+
+.am-usage {
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.msg-copy {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  color: var(--dsw-alias-label-tertiary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.msg-copy:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.msg-copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+.msg-copy[data-copied] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
 /* ----- Turn process header (TurnProcessNodeView) ----- */
 
 .turn {

@@ -22,6 +22,8 @@ export const CODE = '<path d="M6.27612 1.5L4.52612 14.5" stroke="currentColor"><
 export const API = '<path d="M3 4L7 8L3 12" stroke="currentColor"></path><path d="M9 12H13" stroke="currentColor"></path>'
 export const SPARKLE = '<path d="M5.875 3C5.875 6.33333 7.54167 8 10.875 8C7.54167 8 5.875 9.66667 5.875 13C5.875 9.66667 4.20833 8 0.875 8C4.20833 8 5.875 6.33333 5.875 3Z" stroke="currentColor"></path><path d="M12.375 1.55823C12.375 3.39156 13.2917 4.30823 15.125 4.30823C13.2917 4.30823 12.375 5.22489 12.375 7.05823C12.375 5.22489 11.4583 4.30823 9.625 4.30823C11.4583 4.30823 12.375 3.39156 12.375 1.55823Z" stroke="currentColor"></path><path d="M12.375 10.4418C12.375 11.7751 13.0417 12.4418 14.375 12.4418C13.0417 12.4418 12.375 13.1084 12.375 14.4418C12.375 13.1084 11.7083 12.4418 10.375 12.4418C11.7083 12.4418 12.375 11.7751 12.375 10.4418Z" stroke="currentColor"></path>'
 export const CODE_BRACKETS = '<path d="M4.67398 4.25061L1.36094 7.86484C1.29085 7.9413 1.29085 8.05866 1.36094 8.13513L4.67398 11.7494" stroke="currentColor"></path><path d="M11.3262 4.25061L14.6392 7.86484C14.7093 7.9413 14.7093 8.05866 14.6392 8.13513L11.3262 11.7494" stroke="currentColor"></path><path d="M9.56222 3.62573L6.43774 12.3743" stroke="currentColor"></path>'
+export const COPY = '<rect x="5.75" y="5.75" width="7.5" height="7.5" rx="1.5" stroke="currentColor"></rect><path d="M10.25 3.25H4.25C3.69772 3.25 3.25 3.69772 3.25 4.25V10.25" stroke="currentColor"></path>'
+export const CHECK = '<path d="M3.5 8.5L6.5 11.5L12.5 4.5" stroke="currentColor"></path>'
 
 /** StateDot ongoing spinner (viewBox 24), StateDot.tsx. */
 export function stateSpinner() {

@@ -210,7 +210,9 @@ function openWindow(): BrowserWindow {
   }
   created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   created.webContents.on('context-menu', (event, params) => {
-    if (params?.isEditable) return
+    // Editable text and an active selection get the native menu (Copy/Paste);
+    // bare right-click still opens the ball's own menu.
+    if (params?.isEditable || params?.hasSelection) return
     event.preventDefault()
     write({ type: 'menu' })
     setTimeout(() => { void showMenu(created) }, 30)

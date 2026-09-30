@@ -14,7 +14,7 @@ declare module 'electron' {
   interface WebContents {
     send(channel: string, ...args: unknown[]): void
     setWindowOpenHandler(handler: () => { action: 'deny' }): void
-    on(event: 'will-navigate' | 'did-finish-load' | 'context-menu', listener: (event: { preventDefault(): void }, params?: { isEditable?: boolean }) => void): void
+    on(event: 'will-navigate' | 'did-finish-load' | 'context-menu', listener: (event: { preventDefault(): void }, params?: { isEditable?: boolean; hasSelection?: boolean }) => void): void
     executeJavaScript(code: string): Promise<unknown>
     session: {
       setPermissionRequestHandler(handler: (contents: WebContents, permission: string, callback: (granted: boolean) => void) => void): void

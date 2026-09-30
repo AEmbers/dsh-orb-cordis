@@ -1126,7 +1126,7 @@ function openWindow() {
 	});
 	created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 	created.webContents.on("context-menu", (event, params) => {
-		if (params?.isEditable) return;
+		if (params?.isEditable || params?.hasSelection) return;
 		event.preventDefault();
 		write({ type: "menu" });
 		setTimeout(() => {

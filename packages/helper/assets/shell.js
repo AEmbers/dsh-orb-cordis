@@ -3,10 +3,11 @@ import {
   processLabel, reasoningSummary, processTitle, toolTitle, toolLabels, classifyTool, deriveSummary,
   formatToolBody, terminalCardModel, terminalFailed, readCardModel,
   searchCardModel, webCardModel, diffCardModel, diffTotals, diffLines,
+  usageLabels, tokenUsageTotal, formatTokenCount,
 } from './transcript-model.js'
 import { upgradeCodeBlocks } from './highlight.js'
 import {
-  icon, THINK, CHEVRON_DOWN, CHEVRON_UP, SEARCH, GLOBE, BROWSE, EDIT, CODE, API, SPARKLE, stateSpinner,
+  icon, THINK, CHEVRON_DOWN, CHEVRON_UP, SEARCH, GLOBE, BROWSE, EDIT, CODE, API, SPARKLE, COPY, CHECK, stateSpinner,
 } from './icons.js'
 
 const api = window.dshOrb
@@ -112,6 +113,7 @@ const en = {
 const PROMPT_LIMIT = 8000
 const messages = navigator.language.toLowerCase().startsWith('zh') ? zh : en
 const chatLabels = toolLabels(messages === zh)
+const usageText = usageLabels(messages === zh)
 
 function applyColorScheme(dark) {
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
@@ -707,6 +709,32 @@ function main() {
     }
   }
 
+  async function writeClipboard(text) {
+    if (navigator.clipboard?.writeText !== undefined) {
+      try {
+        await navigator.clipboard.writeText(text)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.append(area)
+    area.select()
+    let copied = false
+    try {
+      copied = document.execCommand('copy')
+    } catch {
+      copied = false
+    }
+    area.remove()
+    return copied
+  }
+
   function copyToClipboard(text, button) {
     const restore = () => {
       button.textContent = chatLabels.copy
@@ -717,26 +745,52 @@ function main() {
       button.dataset.copied = 'true'
       setTimeout(restore, 1600)
     }
-    if (navigator.clipboard?.writeText !== undefined) {
-      navigator.clipboard.writeText(text).then(done, () => {
-        restore()
-      })
-      return
-    }
-    const area = document.createElement('textarea')
-    area.value = text
-    area.setAttribute('readonly', '')
-    area.style.position = 'fixed'
-    area.style.opacity = '0'
-    document.body.append(area)
-    area.select()
-    try {
-      if (document.execCommand('copy')) done()
+    void writeClipboard(text).then((ok) => {
+      if (ok) done()
       else restore()
-    } catch {
-      restore()
+    })
+  }
+
+  /**
+   * Icon copy button for message chrome (MessageIconActions): copy glyph,
+   * brief check mark once the clipboard write resolves.
+   */
+  function messageCopyButton(getText) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'msg-copy'
+    button.title = chatLabels.copy
+    button.append(icon(COPY))
+    let revertTimer
+    const reset = () => {
+      delete button.dataset.copied
+      button.title = chatLabels.copy
+      button.replaceChildren(icon(COPY))
     }
-    area.remove()
+    button.addEventListener('click', (event) => {
+      event.stopPropagation()
+      if (button.dataset.copied === 'true') return
+      void writeClipboard(getText()).then((ok) => {
+        if (!ok) return
+        clearTimeout(revertTimer)
+        button.dataset.copied = 'true'
+        button.title = chatLabels.copied
+        button.replaceChildren(icon(CHECK))
+        revertTimer = setTimeout(reset, 1200)
+      })
+    })
+    return button
+  }
+
+  /** Usage pill text: "12.3K tok", hidden entirely when no usage arrived. */
+  function usagePill(node, block) {
+    const pill = node.querySelector('.am-usage')
+    const total = block.running ? null : tokenUsageTotal(block.usage)
+    pill.hidden = total === null
+    if (total !== null) {
+      pill.textContent = usageText.count(formatTokenCount(total))
+      pill.title = usageText.title
+    }
   }
 
   function wireCopyButtons(root) {
@@ -1269,9 +1323,17 @@ function main() {
     return node
   }
 
+  /** Per-node raw text the message copy button writes (raw markdown, as Harness). */
+  const messageCopyText = new WeakMap()
+
   function updateAssistantNode(node, block) {
     const body = node.querySelector('.am-body')
     renderMarkdownBody(body, block.text, { live: block.running === true })
+    const record = messageCopyText.get(node)
+    if (record) record.text = block.text
+    const actions = node.querySelector('.am-actions')
+    if (actions) actions.hidden = block.running === true
+    usagePill(node, block)
     const existing = node.querySelector('.am-stopped')
     if (block.interrupted === true) {
       const chip = existing ?? document.createElement('span')
@@ -1293,7 +1355,10 @@ function main() {
         node.dataset.kind = 'user'
         const bubble = document.createElement('div')
         bubble.className = 'user-bubble'
-        node.append(bubble)
+        const actions = document.createElement('div')
+        actions.className = 'user-actions'
+        actions.append(messageCopyButton(() => bubble.textContent ?? ''))
+        node.append(bubble, actions)
       } else if (block.kind === 'assistant') {
         node = document.createElement('article')
         node.className = 'block'
@@ -1302,7 +1367,17 @@ function main() {
         root.className = 'am'
         const body = document.createElement('div')
         body.className = 'am-body'
-        root.append(body)
+        const actions = document.createElement('div')
+        actions.className = 'am-actions'
+        actions.hidden = true
+        const copyText = { text: '' }
+        messageCopyText.set(node, copyText)
+        actions.append(messageCopyButton(() => copyText.text))
+        const usage = document.createElement('span')
+        usage.className = 'am-usage'
+        usage.hidden = true
+        actions.append(usage)
+        root.append(body, actions)
         node.append(root)
       } else if (block.kind === 'tool') {
         node = createToolNode(block)

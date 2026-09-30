@@ -543,3 +543,33 @@ export function toolLabels(zh) {
         contentTruncated: 'Content truncated',
       }
 }
+
+/* ----- Turn token usage (TurnUsagePanel pill) ----- */
+
+export function usageLabels(zh) {
+  return zh
+    ? { title: '本轮用量', count: (count) => `${count} tok` }
+    : { title: 'Turn usage', count: (count) => `${count} tok` }
+}
+
+/**
+ * Billed tokens of one settled message: the three disjoint prompt buckets plus
+ * output, as the Harness usage pill totals it (provider totals may disagree).
+ */
+export function tokenUsageTotal(usage) {
+  if (typeof usage !== 'object' || usage === null) return null
+  const count = (value) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+  const total = count(usage.inputTokens) + count(usage.cacheReadTokens)
+    + count(usage.cacheWriteTokens) + count(usage.outputTokens)
+  return total > 0 ? total : null
+}
+
+/** Compact token figure, mirroring the Harness formatTokens scaling. */
+export function formatTokenCount(value) {
+  const scaled = (candidate) => candidate >= 100
+    ? String(Math.round(candidate))
+    : String(Math.round(candidate * 10) / 10)
+  if (value < 1e3) return String(value)
+  if (value < 1e6) return `${scaled(value / 1e3)}K`
+  return `${scaled(value / 1e6)}M`
+}

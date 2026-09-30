@@ -706,6 +706,62 @@ describe('ball control socket', { concurrency: 1 }, () => {
     }
   })
 
+  it('rides the message usage on the closing reply block only', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      harness.holdPrompt()
+      client.send({ type: 'prompt', text: '用量' })
+      await waitFor(() => harness.calls.prompt.length > 0)
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 1,
+        data: {
+          turn: 1, step: 0,
+          message: { content: [{ type: 'reasoning', text: '想想' }, { type: 'text', text: '第一答' }] },
+          usage: { inputTokens: 1200, outputTokens: 345, cacheReadTokens: 800, reasoningTokens: 120 },
+        },
+      })
+      harness.inject(sessionId, {
+        type: 'assistant/message', seq: 2,
+        data: {
+          turn: 1, step: 1,
+          message: { content: [{ type: 'text', text: '第二答' }] },
+          usage: { inputTokens: 90, outputTokens: 8 },
+        },
+      })
+      harness.inject(sessionId, { type: 'turn/end', seq: 3, data: {} })
+      harness.releasePrompt()
+      await waitFor(() => client.messages.some((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:1:0' && textOf(message) === '第二答'
+      )))
+      const lastOf = (key: string) => client.messages.filter((message) => (
+        message.type === 'block' && keyOf(message) === key
+      )).at(-1) as Record<string, unknown>
+      // Usage lands on each message's closing reply; the reasoning block stays bare.
+      assert.deepEqual(lastOf('b:1:1:0').usage, { inputTokens: 90, outputTokens: 8 })
+      assert.deepEqual(lastOf('b:1:0:1').usage, {
+        inputTokens: 1200, outputTokens: 345, cacheReadTokens: 800, reasoningTokens: 120,
+      })
+      assert.equal(lastOf('b:1:0:0').usage, undefined)
+      // Demoting the earlier response keeps its usage attached.
+      assert.equal(lastOf('b:1:0:1').response, undefined)
+      const demoted = client.messages.filter((message) => (
+        message.type === 'block' && keyOf(message) === 'b:1:0:1' && (message as { response?: true }).response === true
+      )).at(-1) as Record<string, unknown>
+      assert.equal(demoted.text, '第一答')
+      assert.deepEqual(demoted.usage, {
+        inputTokens: 1200, outputTokens: 345, cacheReadTokens: 800, reasoningTokens: 120,
+      })
+    } finally {
+      harness.releasePrompt()
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
   it('carries tool arguments, results, and interruption to the ball', async () => {
     const harness = boot()
     const client = await connect(harness.runtime)

@@ -45,6 +45,19 @@ body {
   -webkit-user-select: none;
 }
 
+/* Transcript prose selects and copies like the main window; the interactive
+ * chrome inside (buttons, tool toggles) stays selection-free. */
+#transcript {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+
+#transcript button {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 #panel {
   position: absolute;
   inset: var(--chrome);

@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { processLabel, reasoningSummary, classifyTool, deriveSummary, formatToolBody, terminalCardModel, terminalFailed, searchCardModel, webCardModel, diffCardModel, diffTotals, diffLines, processTitle, toolTitle, readCardModel } from '../assets/transcript-model.js'
+import { processLabel, reasoningSummary, classifyTool, deriveSummary, formatToolBody, terminalCardModel, terminalFailed, searchCardModel, webCardModel, diffCardModel, diffTotals, diffLines, processTitle, toolTitle, readCardModel, usageLabels, tokenUsageTotal, formatTokenCount } from '../assets/transcript-model.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -149,6 +149,31 @@ describe('step process title', () => {
   })
 })
 
+describe('turn usage pill', () => {
+  it('totals billed input plus output, ignoring absent cache buckets', () => {
+    assert.equal(tokenUsageTotal({ inputTokens: 100, outputTokens: 40 }), 140)
+    assert.equal(tokenUsageTotal({ inputTokens: 100, outputTokens: 40, cacheReadTokens: 900 }), 1040)
+    assert.equal(tokenUsageTotal({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 900 }), 900)
+    assert.equal(tokenUsageTotal(undefined), null)
+    assert.equal(tokenUsageTotal('nope'), null)
+    assert.equal(tokenUsageTotal({ inputTokens: -5, outputTokens: 'x' }), null)
+  })
+
+  it('scales compact counts like the Harness pill', () => {
+    assert.equal(formatTokenCount(999), '999')
+    assert.equal(formatTokenCount(1000), '1K')
+    assert.equal(formatTokenCount(1234), '1.2K')
+    assert.equal(formatTokenCount(12345), '12.3K')
+    assert.equal(formatTokenCount(123456), '123K')
+    assert.equal(formatTokenCount(1234567), '1.2M')
+    const zh = usageLabels(true)
+    const en = usageLabels(false)
+    assert.equal(zh.count(formatTokenCount(1234)), '1.2K tok')
+    assert.equal(zh.title, '本轮用量')
+    assert.equal(en.title, 'Turn usage')
+  })
+})
+
 describe('ball page module', () => {
   it('imports the transcript model from the helper page', () => {
     const shell = readFileSync(join(here, '../assets/shell.js'), 'utf8')
@@ -157,5 +182,19 @@ describe('ball page module', () => {
     assert.match(shell, /reasoningSummary\(/)
     assert.match(shell, /processLabel\(/)
     assert.match(html, /type="module" src="shell\.js"/)
+  })
+
+  it('wires message copy buttons and the usage pill into both message kinds', () => {
+    const shell = readFileSync(join(here, '../assets/shell.js'), 'utf8')
+    const chat = readFileSync(join(here, '../assets/chat.css'), 'utf8')
+    assert.match(shell, /messageCopyButton\(/)
+    assert.match(shell, /className = 'user-actions'/)
+    assert.match(shell, /className = 'am-actions'/)
+    assert.match(shell, /usagePill\(/)
+    assert.match(chat, /\.msg-copy/)
+    assert.match(chat, /\.am-usage/)
+    // Transcript prose stays selectable; the global sheet keeps chrome unselectable.
+    const floating = readFileSync(join(here, '../assets/floating.css'), 'utf8')
+    assert.match(floating, /#transcript \{[^}]*user-select: text/s)
   })
 })

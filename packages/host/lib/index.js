@@ -2074,6 +2074,7 @@ var OrbRuntime = class {
 		if (!record) return;
 		const turn = numberOf(record.turn);
 		const step = numberOf(record.step);
+		const usage = readUsage(record.usage);
 		if (record.interrupted === true) this.turnInterrupted = true;
 		const previous = this.responseKeys;
 		this.responseKeys = [];
@@ -2112,6 +2113,11 @@ var OrbRuntime = class {
 			cursor += 1;
 		}
 		this.responseKeys = writtenKeys;
+		if (usage !== void 0) {
+			const last = [...writtenKeys].reverse().find((key) => this.blocks.get(key)?.kind === "assistant");
+			const settled = last === void 0 ? void 0 : this.blocks.get(last);
+			if (last !== void 0 && settled) this.block(last, settled.kind, settled.text, false, "set", void 0, usage);
+		}
 	}
 	/** Remove one block everywhere: map, order, and the ball's DOM. */
 	dropBlock(key) {
@@ -2183,7 +2189,7 @@ var OrbRuntime = class {
 		this.dirty.delete(key);
 		this.publish(message);
 	}
-	block(key, kind, text, running, mode, detail) {
+	block(key, kind, text, running, mode, detail, usage) {
 		const previous = this.blocks.get(key);
 		const previousText = previous?.text ?? "";
 		const next = clip(mode === "append" ? `${previousText}${text}` : text, 2e4);
@@ -2200,6 +2206,7 @@ var OrbRuntime = class {
 			...mergedDetail,
 			...mergedDetail.error === void 0 ? {} : { error: mergedDetail.error }
 		};
+		const mergedUsage = usage === void 0 ? previous?.usage : usage;
 		const message = {
 			type: "block",
 			key,
@@ -2208,7 +2215,8 @@ var OrbRuntime = class {
 			running,
 			...this.turnInterrupted && kind === "assistant" && !running ? { interrupted: true } : {},
 			...this.responseKeys.includes(key) ? { response: true } : {},
-			...merged === void 0 ? {} : { detail: merged }
+			...merged === void 0 ? {} : { detail: merged },
+			...mergedUsage === void 0 ? {} : { usage: mergedUsage }
 		};
 		if (!this.blocks.has(key)) {
 			this.blockOrder.push(key);
@@ -2822,6 +2830,26 @@ function asRecord(value) {
 }
 function numberOf(value) {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+/** Validate the provider token-usage payload of an `assistant/message` event. */
+function readUsage(value) {
+	const record = asRecord(value);
+	if (!record) return void 0;
+	const count = (raw) => {
+		const number = typeof raw === "number" ? raw : NaN;
+		return Number.isFinite(number) && number >= 0 ? number : void 0;
+	};
+	const inputTokens = count(record.inputTokens);
+	const outputTokens = count(record.outputTokens);
+	if (inputTokens === void 0 || outputTokens === void 0) return void 0;
+	return {
+		inputTokens,
+		outputTokens,
+		...count(record.totalTokens) === void 0 ? {} : { totalTokens: count(record.totalTokens) },
+		...count(record.cacheReadTokens) === void 0 ? {} : { cacheReadTokens: count(record.cacheReadTokens) },
+		...count(record.cacheWriteTokens) === void 0 ? {} : { cacheWriteTokens: count(record.cacheWriteTokens) },
+		...count(record.reasoningTokens) === void 0 ? {} : { reasoningTokens: count(record.reasoningTokens) }
+	};
 }
 function partKind(part) {
 	if (!part) return void 0;
