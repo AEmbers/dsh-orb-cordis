@@ -1,9 +1,9 @@
 import z from "@deepseek-ai/schemastery";
 import { ContextFormed } from "@deepseek-ai/dsh-llm";
+import { Session } from "@deepseek-ai/dsh-session";
 import { z as z$1 } from "zod";
 import { ImageMediaType } from "@deepseek-ai/dsh-attachment";
 import { Context } from "@deepseek-ai/cordis";
-import "@deepseek-ai/dsh-session";
 //#region src/config.d.ts
 /** Loader-accepted Computer Use configuration. */
 interface Config {
@@ -373,10 +373,17 @@ declare module '@deepseek-ai/dsh-session/types' {
     /**
      * Click encoding for this Computer Use session: millifraction 0–1000 or
      * attached-raster pixels. Whole-value replace; the last event wins. A log
-     * with none folds to millifraction. Not ignorable: a reader that skipped
-     * it would mis-map stored `position` arrays.
+     * with none folds to millifraction. Written `ignorable: true` whenever the
+     * host catalog does not know the type (official harnesses refuse a log
+     * carrying an unknown required event outright); the coordinate contract is
+     * also echoed in every GUI tool result's text, so a reader that skips this
+     * event can still recover the space from the log.
      */
     'computer-use/coordinate-mode': {
+      mode: CoordinateMode;
+    };
+    /** V3→V4 migration alias of the same record (unknown ignorable events are namespaced `plugin:`). */
+    'plugin:computer-use/coordinate-mode': {
       mode: CoordinateMode;
     };
   }

@@ -5,7 +5,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { z as zod } from 'zod'
 import type { ZodType } from 'zod'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -41,10 +41,15 @@ declare module '@deepseek-ai/dsh-session/types' {
     /**
      * Click encoding for this Computer Use session: millifraction 0–1000 or
      * attached-raster pixels. Whole-value replace; the last event wins. A log
-     * with none folds to millifraction. Not ignorable: a reader that skipped
-     * it would mis-map stored `position` arrays.
+     * with none folds to millifraction. Written `ignorable: true` whenever the
+     * host catalog does not know the type (official harnesses refuse a log
+     * carrying an unknown required event outright); the coordinate contract is
+     * also echoed in every GUI tool result's text, so a reader that skips this
+     * event can still recover the space from the log.
      */
     'computer-use/coordinate-mode': { mode: CoordinateMode }
+    /** V3→V4 migration alias of the same record (unknown ignorable events are namespaced `plugin:`). */
+    'plugin:computer-use/coordinate-mode': { mode: CoordinateMode }
   }
 }
 
@@ -59,14 +64,27 @@ const COORDINATE_MODE_STATE_SCHEMA: ZodType<{ mode: CoordinateMode }> = zod.obje
   mode: zod.enum(['millifraction', 'pixel']),
 }).strict()
 
-/** Projection unit folding `'computer-use/coordinate-mode'` to the last logged encoding. */
+/** Canonical record type plus the `plugin:`-prefixed alias a V3→V4 migration writes for it. */
+type CoordinateModeEventType = 'computer-use/coordinate-mode' | 'plugin:computer-use/coordinate-mode'
+
+/**
+ * Does this event carry the coordinate-mode record — canonical name or the
+ * migration alias — so every reader accepts both?
+ * @param event - candidate session event.
+ * @returns whether the event is a coordinate-mode record.
+ */
+function isCoordinateModeEvent(event: SessionEvent | undefined): event is SessionEvent<CoordinateModeEventType> {
+  return event?.type === 'computer-use/coordinate-mode' || event?.type === 'plugin:computer-use/coordinate-mode'
+}
+
+/** Projection unit folding the coordinate-mode record to the last logged encoding. */
 export const coordinateModeProjection = {
   key: 'computerUseCoordinateMode',
   stateVersion: 1,
   stateSchema: COORDINATE_MODE_STATE_SCHEMA,
   init: () => ({ mode: 'millifraction' as const }),
   apply: (state, event: SessionEvent) => {
-    if (event.type !== 'computer-use/coordinate-mode') return state
+    if (!isCoordinateModeEvent(event)) return state
     if (event.data.mode === state.mode) return state
     return { mode: event.data.mode }
   },
@@ -77,6 +95,14 @@ interface OrbCoordinateMode {
 }
 
 const observationCache = new WeakMap<object, ObservationRaster | false>()
+
+/**
+ * Create-time encoding for a session whose log cannot carry the record (the
+ * official reader refuses unknown non-ignorable events, and no harness here
+ * lets a plugin write the marker yet). Process-local: a resumed session falls
+ * back to millifraction, the documented drift the stamp exists to avoid.
+ */
+const sessionModeCache = new WeakMap<object, CoordinateMode>()
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
@@ -139,7 +165,8 @@ function reconstructFromLog(session: Session): ObservationRaster | undefined {
 }
 
 /**
- * Logged encoding when a `'computer-use/coordinate-mode'` event exists.
+ * Logged encoding when a coordinate-mode record exists — canonical type or the
+ * `plugin:` alias a V3→V4 migration writes for it.
  * @param session - session to scan, or a test stub.
  * @returns the last logged mode, or undefined when the log has none.
  */
@@ -148,19 +175,21 @@ export function loggedCoordinateMode(session: Session | undefined): CoordinateMo
   if (events === undefined) return undefined
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event?.type === 'computer-use/coordinate-mode') return event.data.mode
+    if (isCoordinateModeEvent(event)) return event.data.mode
   }
   return undefined
 }
 
 /**
- * Click encoding in force for a request. Missing event, missing session, and
+ * Click encoding in force for a request. Missing record, missing session, and
  * Headless/Web logs without a stamp all read as millifraction.
  * @param session - the session being assembled or executed.
  * @returns millifraction or pixel.
  */
 export function coordinateModeOf(session: Session | undefined): CoordinateMode {
-  return loggedCoordinateMode(session) ?? 'millifraction'
+  return loggedCoordinateMode(session)
+    ?? (session === undefined ? undefined : sessionModeCache.get(session))
+    ?? 'millifraction'
 }
 
 /**
@@ -304,18 +333,67 @@ export function toolsForCoordinateMode(tools: readonly ToolSchema[], mode: Coord
 }
 
 function hasCoordinateModeEvent(session: Session): boolean {
-  return session.snapshotEvents().some(event => event.type === 'computer-use/coordinate-mode')
+  return session.snapshotEvents().some(event => isCoordinateModeEvent(event))
 }
 
 function hasEndSeed(session: Session): boolean {
   return session.snapshotEvents().some(event => event.type === 'session/end-seed')
 }
 
+/** How this harness can carry the create-time record. */
+type StampCapability = 'catalog' | 'ignorable' | 'none'
+
 /**
- * Stamp a blank overlay create with the Desktop default encoding.
- * History adopt / resume (an `session/end-seed` is already in the log) and a
- * log that already has `'computer-use/coordinate-mode'` are left unchanged.
- * Headless/Web omit `orbCoordinateMode` and do not write the event.
+ * Append the record. `ignorable` rides the append options on harnesses that
+ * accept the envelope marker; the cast keeps the call compilable against
+ * 0.1.7-rc.2, whose `append` types only expose surface options.
+ * @param session - session receiving the record.
+ * @param mode - encoding to persist.
+ * @param ignorable - write the envelope's `ignorable: true` marker.
+ * @returns the appended event envelope.
+ */
+function appendCoordinateMode(
+  session: Session,
+  mode: CoordinateMode,
+  ignorable: boolean,
+): SessionEvent<'computer-use/coordinate-mode'> {
+  if (!ignorable) return session.append('computer-use/coordinate-mode', { mode })
+  const append = session.append as unknown as (
+    this: Session,
+    type: 'computer-use/coordinate-mode',
+    data: { mode: CoordinateMode },
+    opts: { ignorable?: true },
+  ) => SessionEvent<'computer-use/coordinate-mode'>
+  return append.call(session, 'computer-use/coordinate-mode', { mode }, { ignorable: true })
+}
+
+/**
+ * Which write strategy this harness supports:
+ * `catalog` — the host registers the type (fork harness), plain append;
+ * `ignorable` — `append` accepts the envelope marker, so official readers skip
+ * the record instead of refusing the log; `none` — neither, so writing the
+ * event would make the log unreadable and the mode stays in process memory.
+ * Probes with a throwaway in-memory session, whose append reports the marker.
+ * @returns the resolved capability.
+ */
+function resolveStampCapability(): StampCapability {
+  if (KNOWN_SESSION_EVENT_TYPES.has('computer-use/coordinate-mode')) return 'catalog'
+  try {
+    const probe = Session.create(SessionId('dsh-orb-coordinate-mode-probe'))
+    return appendCoordinateMode(probe, 'millifraction', true).ignorable === true ? 'ignorable' : 'none'
+  } catch {
+    return 'none'
+  }
+}
+
+/**
+ * Stamp a blank overlay create with the Desktop default encoding, degrading by
+ * host capability so the record never makes the log unreadable:
+ * catalog/ignorable harnesses get the logged event; a harness with neither —
+ * official 0.1.7 refuses unknown required events — only keeps the encoding in
+ * process memory. History adopt / resume (an `session/end-seed` is already in
+ * the log) and a log that already has the record are left unchanged.
+ * Headless/Web omit `orbCoordinateMode` and do not record anything.
  * @param ctx - plugin context; optional `orbCoordinateMode` is Desktop-only.
  * @param session - newly created Computer Use session.
  */
@@ -323,7 +401,14 @@ export function stampCoordinateMode(ctx: Context, session: Session): void {
   if (hasCoordinateModeEvent(session) || hasEndSeed(session)) return
   const service = ctx.get('orbCoordinateMode') as OrbCoordinateMode | undefined
   if (service === undefined) return
-  session.append('computer-use/coordinate-mode', { mode: service.currentMode() })
+  const mode = service.currentMode()
+  sessionModeCache.set(session, mode)
+  const capability = resolveStampCapability()
+  if (capability === 'catalog') {
+    appendCoordinateMode(session, mode, false)
+    return
+  }
+  if (capability === 'ignorable') appendCoordinateMode(session, mode, true)
 }
 
 /**

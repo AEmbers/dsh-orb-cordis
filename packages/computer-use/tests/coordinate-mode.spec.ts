@@ -1,13 +1,13 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -46,13 +46,25 @@ function agentFor(session: Session): Agent {
 }
 
 describe('computer-use coordinate-mode stamp', () => {
-  it('stamps a blank create from orbCoordinateMode and leaves resume and existing events alone', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).delete('computer-use/coordinate-mode')
+  })
+
+  function desktopContext(): Context {
     const ctx = new Context()
     ctx.provide('orbCoordinateMode', { currentMode: () => 'pixel' as const })
+    return ctx
+  }
+
+  it('writes a plain event when the host catalog registers the type (fork harness)', () => {
+    ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add('computer-use/coordinate-mode')
+    const ctx = desktopContext()
     const fresh = Session.create(SessionId('cu-coord-fresh'))
     stampCoordinateMode(ctx, fresh)
     expect(loggedCoordinateMode(fresh)).toBe('pixel')
     expect(coordinateModeOf(fresh)).toBe('pixel')
+    expect(fresh.snapshotEvents().filter(event => event.type === 'computer-use/coordinate-mode')).toHaveLength(1)
 
     stampCoordinateMode(ctx, fresh)
     expect(fresh.snapshotEvents().filter(event => event.type === 'computer-use/coordinate-mode')).toHaveLength(1)
@@ -64,15 +76,54 @@ describe('computer-use coordinate-mode stamp', () => {
     expect(coordinateModeOf(resumed)).toBe('millifraction')
   })
 
+  it('skips the log and keeps the mode in process memory on a harness with neither mechanism', () => {
+    const ctx = desktopContext()
+    const fresh = Session.create(SessionId('cu-coord-memory'))
+    stampCoordinateMode(ctx, fresh)
+    expect(loggedCoordinateMode(fresh)).toBeUndefined()
+    expect(fresh.snapshotEvents().some(event => event.type === 'computer-use/coordinate-mode')).toBe(false)
+    expect(coordinateModeOf(fresh)).toBe('pixel')
+    expect(coordinateModeOf(Session.create(SessionId('cu-coord-other')))).toBe('millifraction')
+
+    const resumed = Session.create(SessionId('cu-coord-memory-resume'), [])
+    stampCoordinateMode(ctx, resumed)
+    expect(coordinateModeOf(resumed)).toBe('millifraction')
+  })
+
+  it('writes with the envelope marker when append keeps the ignorable option', () => {
+    const session = Session.create(SessionId('cu-coord-ignorable'))
+    const append = vi.spyOn(session, 'append')
+    vi.spyOn(Session, 'create').mockImplementation(() => ({
+      append: () => ({ ignorable: true }),
+    }) as unknown as Session)
+    const ctx = desktopContext()
+    stampCoordinateMode(ctx, session)
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(append).toHaveBeenCalledWith('computer-use/coordinate-mode', { mode: 'pixel' }, { ignorable: true })
+  })
+
+  it('reads the migrated plugin: alias and does not re-stamp a log that already has the record', () => {
+    const session = Session.create(SessionId('cu-coord-alias'))
+    session.append('plugin:computer-use/coordinate-mode', { mode: 'pixel' })
+    expect(loggedCoordinateMode(session)).toBe('pixel')
+    expect(coordinateModeOf(session)).toBe('pixel')
+    stampCoordinateMode(desktopContext(), session)
+    expect(session.snapshotEvents().filter(
+      event => event.type === 'computer-use/coordinate-mode' || event.type === 'plugin:computer-use/coordinate-mode',
+    )).toHaveLength(1)
+  })
+
   it('does not write an event without orbCoordinateMode', () => {
     const ctx = new Context()
     const session = Session.create(SessionId('cu-coord-headless'))
     stampCoordinateMode(ctx, session)
     expect(loggedCoordinateMode(session)).toBeUndefined()
+    expect(coordinateModeOf(session)).toBe('millifraction')
     expect(coordinateModeOf(undefined)).toBe('millifraction')
   })
 
   it('stamps from agent/created when the Desktop service is present', async () => {
+    ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add('computer-use/coordinate-mode')
     const home = await mkdtemp(join(tmpdir(), 'dsh-cu-coord-'))
     homes.push(home)
     const ctx = new Context()
@@ -305,6 +356,23 @@ describe('computer-use coordinate-mode projection', () => {
     await ctx.plugin(SessionProjectionRegistry)
     const session = Session.create(SessionId('cu-coord-late-proj'))
     session.append('computer-use/coordinate-mode', { mode: 'pixel' })
+    expect(ctx.sessionProjections.stateOf(session, 'computerUseCoordinateMode')).toEqual({
+      mode: 'pixel',
+    })
+  })
+
+  it('folds the migrated plugin: alias', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-cu-proj-alias-'))
+    homes.push(home)
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(LocalAttachmentStore, { dshHome: home })
+    applyComputerUse(ctx, createFakeDesktopBackend(), resolveComputerUseConfig({ postActionWaitMs: 0 }))
+    const session = Session.create(SessionId('cu-coord-proj-alias'))
+    session.append('plugin:computer-use/coordinate-mode', { mode: 'pixel' })
     expect(ctx.sessionProjections.stateOf(session, 'computerUseCoordinateMode')).toEqual({
       mode: 'pixel',
     })
