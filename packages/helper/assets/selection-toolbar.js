@@ -5,6 +5,34 @@ function applyLanguage(language) {
   document.querySelector('#language-en').setAttribute('aria-checked', language === 'en' ? 'true' : 'false')
 }
 
+// Bar labels mirror the main window's language (the appearance message); the
+// theme mirrors the ball's nativeTheme, with the system scheme as the fallback.
+let uiZh = (navigator.language || '').toLowerCase().startsWith('zh')
+
+function applyUiLanguage(zh) {
+  uiZh = zh
+  document.querySelector('#search').textContent = zh ? '搜索' : 'Search'
+  document.querySelector('#translate').textContent = zh ? '翻译' : 'Translate'
+  document.querySelector('#send-to-agent').textContent = zh ? '发给 Agent' : 'Send to Agent'
+  document.querySelector('#translate-arrow').setAttribute('aria-label', zh ? '翻译语言' : 'Translate language')
+}
+
+function applyDark(dark) {
+  document.body.toggleAttribute('data-ds-dark-theme', dark === true)
+}
+
+if (typeof api.selection.onAppearance === 'function') {
+  api.selection.onAppearance((appearance) => {
+    if (appearance === null || typeof appearance !== 'object') return
+    applyDark(appearance.dark)
+    applyUiLanguage(appearance.locale !== 'en')
+  })
+}
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
+applyDark(darkQuery.matches)
+darkQuery.addEventListener('change', (event) => { applyDark(event.matches) })
+applyUiLanguage(uiZh)
+
 function placeMenu() {
   const group = document.querySelector('#translate-group')
   document.querySelector('#language-menu').style.left = `${String(group.offsetLeft)}px`
@@ -31,11 +59,6 @@ function closeMenu() {
   void syncToolbarSize()
 }
 
-const zh = (navigator.language || '').toLowerCase().startsWith('zh')
-document.querySelector('#search').textContent = zh ? '搜索' : 'Search'
-document.querySelector('#translate').textContent = zh ? '翻译' : 'Translate'
-document.querySelector('#send-to-agent').textContent = zh ? '发给 Agent' : 'Send to Agent'
-document.querySelector('#translate-arrow').setAttribute('aria-label', zh ? '翻译语言' : 'Translate language')
 document.querySelector('#language-zh').textContent = '中文'
 document.querySelector('#language-en').textContent = 'English'
 

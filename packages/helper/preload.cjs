@@ -88,4 +88,7 @@ contextBridge.exposeInMainWorld('dshOrb', {
   onAttach(callback) {
     ipcRenderer.on('orb:attach', (_event, text) => callback(text))
   },
+  onAppearance(callback) {
+    ipcRenderer.on('orb:appearance', (_event, appearance) => callback(appearance))
+  },
 })

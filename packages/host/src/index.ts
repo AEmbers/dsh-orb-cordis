@@ -7,6 +7,7 @@ import { TccMonitor } from './tcc.ts'
 import { profileDirectory, ProfileStore } from './preferences.ts'
 import { registerOrbRoutes } from './routes.ts'
 import { installOrbServices, watchOrbPermissions } from './services.ts'
+import { watchAppearance } from './appearance.ts'
 import { OrbRuntime, type OrbContext } from './orb.ts'
 
 /** Cordis plugin name. */
@@ -41,6 +42,9 @@ export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): vo
     const detachQuestions = runtime.attachQuestions()
     const detachPermissions = watchOrbPermissions(ctx, store)
     const detachRoutes = registerOrbRoutes({ ctx, store, tcc, control: runtime })
+    // Theme and locale follow the official settings document; a missing
+    // settings service leaves the ball on its system defaults.
+    const detachAppearance = watchAppearance(ctx, (appearance) => { runtime.setAppearance(appearance) })
     const start = process.platform !== 'linux' && config.autoStart !== false && store.ballEnabled()
     if (start) {
       void runtime.start().catch((error: unknown) => {
@@ -51,6 +55,7 @@ export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): vo
       detachQuestions()
       detachPermissions()
       detachRoutes()
+      detachAppearance()
       runtime.halt()
     }
   })

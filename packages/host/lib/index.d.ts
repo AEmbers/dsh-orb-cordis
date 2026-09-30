@@ -109,6 +109,8 @@ interface OrbContext {
   }) => void, options?: {
     readonly global?: boolean;
   }): (() => void) | void;
+  on(name: 'settings/document-updated', listener: (ns: unknown, revision: unknown) => void): (() => void) | void;
+  on(name: string, listener: (...args: unknown[]) => void): (() => void) | void;
 }
 interface QuestionRequest {
   readonly questions?: unknown;

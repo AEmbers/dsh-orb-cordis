@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, dialog, ipcMain, screen, shell } from "electron";
+import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, screen, shell } from "electron";
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -709,80 +709,86 @@ async function attachOverlays(deps) {
 		const ball = deps.ball();
 		if (ball && !ball.isDestroyed()) ball.setAlwaysOnTop(true, "screen-saver");
 	}
-	return { deliver(message) {
-		if (typeof message !== "object" || message === null) return false;
-		const record = message;
-		if (record.type === "selection") {
-			if (typeof record.x !== "number" || typeof record.y !== "number") return true;
-			language = record.language === "en" ? "en" : "zh";
-			const work = workAreaOf({
-				x: record.x,
-				y: record.y
-			});
-			const bounds = selectionToolbarBounds({
-				x: record.x,
-				y: record.y
-			}, SELECTION_TOOLBAR_SIZE, work);
-			barOrigin = {
-				x: bounds.x,
-				y: bounds.y
-			};
-			if (!toolbar.isDestroyed()) {
-				toolbar.setBounds(bounds);
-				toolbar.showInactive();
-				toolbar.webContents.send("orb:selection-state", { language });
+	return {
+		/** Mirror the ball's theme and UI language onto the selection toolbar. */
+		appearance(payload) {
+			if (!toolbar.isDestroyed()) toolbar.webContents.send("orb:appearance", payload);
+		},
+		deliver(message) {
+			if (typeof message !== "object" || message === null) return false;
+			const record = message;
+			if (record.type === "selection") {
+				if (typeof record.x !== "number" || typeof record.y !== "number") return true;
+				language = record.language === "en" ? "en" : "zh";
+				const work = workAreaOf({
+					x: record.x,
+					y: record.y
+				});
+				const bounds = selectionToolbarBounds({
+					x: record.x,
+					y: record.y
+				}, SELECTION_TOOLBAR_SIZE, work);
+				barOrigin = {
+					x: bounds.x,
+					y: bounds.y
+				};
+				if (!toolbar.isDestroyed()) {
+					toolbar.setBounds(bounds);
+					toolbar.showInactive();
+					toolbar.webContents.send("orb:selection-state", { language });
+					raiseChrome();
+				}
+				return true;
+			}
+			if (record.type === "selection-hide") {
+				hideToolbar();
+				return true;
+			}
+			if (record.type === "selection-pointer") {
+				if (typeof record.x !== "number" || typeof record.y !== "number") return true;
+				if (toolbar.isDestroyed() || !toolbar.isVisible() || !pointInRect({
+					x: record.x,
+					y: record.y
+				}, toolbar.getBounds())) hideToolbar();
+				return true;
+			}
+			if (record.type === "selection-language") {
+				language = record.language === "en" ? "en" : "zh";
+				if (!toolbar.isDestroyed()) toolbar.webContents.send("orb:selection-state", { language });
+				return true;
+			}
+			if (record.type === "selection-attach") {
+				const ball = deps.ball();
+				if (ball && !ball.isDestroyed() && typeof record.text === "string") {
+					ball.webContents.send("orb:attach", record.text);
+					ball.showInactive();
+				}
+				hideToolbar();
+				return true;
+			}
+			if (record.type === "overlay-capture") {
+				if (record.active === false) cloak.end("capture");
+				else cloak.begin("capture");
+				ack(record.id);
+				return true;
+			}
+			if (record.type === "overlay-input") {
+				const begin = record.active === true;
+				if (begin) hideToolbar();
+				if (begin) cloak.begin("input");
+				else cloak.end("input");
+				scheduleCloakAck(() => ack(record.id), "input", begin ? "begin" : "end");
+				return true;
+			}
+			if (record.type === "observation-frame") {
+				showFrame(frame, record.bounds);
 				raiseChrome();
+				ack(record.id);
+				return true;
 			}
-			return true;
+			return false;
 		}
-		if (record.type === "selection-hide") {
-			hideToolbar();
-			return true;
-		}
-		if (record.type === "selection-pointer") {
-			if (typeof record.x !== "number" || typeof record.y !== "number") return true;
-			if (toolbar.isDestroyed() || !toolbar.isVisible() || !pointInRect({
-				x: record.x,
-				y: record.y
-			}, toolbar.getBounds())) hideToolbar();
-			return true;
-		}
-		if (record.type === "selection-language") {
-			language = record.language === "en" ? "en" : "zh";
-			if (!toolbar.isDestroyed()) toolbar.webContents.send("orb:selection-state", { language });
-			return true;
-		}
-		if (record.type === "selection-attach") {
-			const ball = deps.ball();
-			if (ball && !ball.isDestroyed() && typeof record.text === "string") {
-				ball.webContents.send("orb:attach", record.text);
-				ball.showInactive();
-			}
-			hideToolbar();
-			return true;
-		}
-		if (record.type === "overlay-capture") {
-			if (record.active === false) cloak.end("capture");
-			else cloak.begin("capture");
-			ack(record.id);
-			return true;
-		}
-		if (record.type === "overlay-input") {
-			const begin = record.active === true;
-			if (begin) hideToolbar();
-			if (begin) cloak.begin("input");
-			else cloak.end("input");
-			scheduleCloakAck(() => ack(record.id), "input", begin ? "begin" : "end");
-			return true;
-		}
-		if (record.type === "observation-frame") {
-			showFrame(frame, record.bounds);
-			raiseChrome();
-			ack(record.id);
-			return true;
-		}
-		return false;
-	} };
+	};
 }
 function showFrame(frame, bounds) {
 	if (frame.isDestroyed()) return;
@@ -948,6 +954,7 @@ let chrome = {
 	catalog: { groups: [] }
 };
 let avatarToken = 0;
+let appearance = readAppearanceEnv();
 process.title = "dsh-orb-helper";
 if (!socketAddress || !token) {
 	console.error("dsh-orb helper: socket environment is missing");
@@ -991,7 +998,12 @@ app.whenReady().then(async () => {
 	}, () => screen.getAllDisplays().map((display) => display.bounds));
 	win.webContents.on("did-finish-load", () => {
 		if (win && !win.isVisible()) win.showInactive();
+		pushAppearance();
 	});
+	nativeTheme.on("updated", () => {
+		pushAppearance();
+	});
+	applyAppearance();
 	await win.loadFile(fileURLToPath(new URL("../assets/floating.html", import.meta.url)));
 	connect(0);
 });
@@ -1250,6 +1262,13 @@ function deliver(message) {
 		chrome = readChrome(record);
 		return;
 	}
+	if (record.type === "appearance") {
+		const next = readAppearanceMessage(message);
+		if (next.theme !== void 0) appearance.theme = next.theme;
+		if (next.locale !== void 0) appearance.locale = next.locale;
+		applyAppearance();
+		return;
+	}
 	if (record.type === "avatar") {
 		const version = record.version;
 		loadAvatar(typeof version === "number" ? version : 0);
@@ -1303,6 +1322,57 @@ function isMove(value) {
 function zhLocale() {
 	return (app.getLocale?.() ?? process.env.LANG ?? "").toLowerCase().startsWith("zh");
 }
+/** Appearance seed from the host: the preferences as of helper launch. */
+function readAppearanceEnv() {
+	const raw = process.env.DSH_ORB_APPEARANCE;
+	if (typeof raw !== "string" || raw.length > 200) return {};
+	try {
+		return readAppearanceMessage(JSON.parse(raw));
+	} catch {
+		return {};
+	}
+}
+function themeSourceOr(value, fallback) {
+	return value === "light" || value === "dark" || value === "system" ? value : fallback;
+}
+/** Accept only well-formed preference fields; anything else keeps the current value. */
+function readAppearanceMessage(value) {
+	if (typeof value !== "object" || value === null) return {};
+	const record = value;
+	const theme = themeSourceOr(record.theme, void 0);
+	return {
+		...theme === void 0 ? {} : { theme },
+		...typeof record.locale === "string" && record.locale.length > 0 && record.locale.length <= 35 ? { locale: record.locale } : {}
+	};
+}
+/**
+* The UI language the ball mirrors: an explicit Host locale that names one of
+* the shipped languages wins, otherwise follow the system like the web client
+* falls back to its browser detection.
+*/
+function uiLanguage() {
+	const preference = typeof appearance.locale === "string" ? appearance.locale.toLowerCase() : "";
+	if (preference.startsWith("zh")) return "zh";
+	if (preference.startsWith("en")) return "en";
+	return zhLocale() ? "zh" : "en";
+}
+/** Menu and dialog copy follow the mirrored language, not the raw system locale. */
+function menuZh() {
+	return uiLanguage() === "zh";
+}
+/** Point the helper's theme at the stored preference and push the resolved state. */
+function applyAppearance() {
+	nativeTheme.themeSource = appearance.theme ?? "system";
+	pushAppearance();
+}
+function pushAppearance() {
+	const payload = {
+		dark: nativeTheme.shouldUseDarkColors,
+		locale: uiLanguage()
+	};
+	if (win && !win.isDestroyed()) win.webContents.send("orb:appearance", payload);
+	overlays?.appearance(payload);
+}
 function readChrome(value) {
 	const record = value;
 	return {
@@ -1319,7 +1389,7 @@ function selectionOr(value, fallback) {
 	return value;
 }
 async function showMenu(window) {
-	const template = contextMenuTemplate(chrome, zhLocale(), {
+	const template = contextMenuTemplate(chrome, menuZh(), {
 		openMain: () => {
 			write({ type: "open-main" });
 		},
@@ -1352,7 +1422,7 @@ async function showMenu(window) {
 }
 async function confirmMillifraction(window, enabled) {
 	if (enabled === chrome.millifractionEnabled) return;
-	const zh = zhLocale();
+	const zh = menuZh();
 	const { response } = await dialog.showMessageBox(window, {
 		type: "question",
 		message: zh ? "新编码只在新对话中生效。" : "The new encoding takes effect in a new conversation.",

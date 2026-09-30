@@ -120,4 +120,10 @@ declare module 'electron' {
   export const shell: {
     openExternal(url: string, options?: { activate?: boolean }): Promise<void>
   }
+
+  export const nativeTheme: {
+    themeSource: 'light' | 'dark' | 'system'
+    shouldUseDarkColors: boolean
+    on(event: 'updated', listener: () => void): void
+  }
 }

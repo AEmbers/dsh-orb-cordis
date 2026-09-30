@@ -105,8 +105,11 @@ window.__ModuleLoader__.load({
       tccFooter: 'After you turn the switches on, quit {name} fully, then open it again. Closing the main window does not quit.',
     }
 
+    // The main window's resolved locale rides <html lang> (dsh-client-locale);
+    // a page without it falls back to the browser languages.
     function copy() {
-      return (navigator.language || '').toLowerCase().startsWith('zh') ? zh : en
+      const lang = `${document.documentElement?.lang || ''}${navigator.language || ''}`
+      return lang.toLowerCase().startsWith('zh') ? zh : en
     }
 
     function h(tag, props, ...children) {
@@ -213,6 +216,15 @@ window.__ModuleLoader__.load({
 
     function OrbSettingsSection() {
       const text = copy()
+      // Re-render when the app's locale changes (<html lang>), so every copy()
+      // call in this section re-evaluates against the new language.
+      const [, bumpLocale] = React.useState(0)
+      React.useEffect(() => {
+        if (typeof MutationObserver !== 'function' || !document.documentElement) return undefined
+        const observer = new MutationObserver(() => { bumpLocale((count) => count + 1) })
+        observer.observe(document.documentElement, { attributeFilter: ['lang'] })
+        return () => { observer.disconnect() }
+      }, [])
       const [state, setState] = React.useState({
         status: 'loading',
         error: '',
@@ -426,8 +438,8 @@ window.__ModuleLoader__.load({
 .dsh-orb-set-button, .dsh-orb-set select { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); background: transparent; color: inherit; border-radius: 8px; padding: 6px 10px; font: inherit; }
 .dsh-orb-set-ghost { border-color: transparent; }
 .dsh-orb-set-switch { width: 40px; height: 24px; border-radius: 999px; border: 0; background: color-mix(in srgb, currentColor 18%, transparent); position: relative; flex: none; }
-.dsh-orb-set-switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: white; transition: transform 120ms ease; }
-.dsh-orb-set-switch.is-on { background: #2f6fed; }
+.dsh-orb-set-switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--dsw-static-neutral-bluish-00, white); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 120ms ease; }
+.dsh-orb-set-switch.is-on { background: var(--dsw-alias-button-info-fill, #2f6fed); }
 .dsh-orb-set-switch.is-on::after { transform: translateX(16px); }
 .dsh-orb-set-tcc { margin-top: 12px; }
 .dsh-orb-set-status { font-weight: 600; }

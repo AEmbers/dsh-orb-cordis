@@ -20,5 +20,8 @@ contextBridge.exposeInMainWorld('dshOrb', {
     onState(callback) {
       ipcRenderer.on('orb:selection-state', (_event, state) => callback(state))
     },
+    onAppearance(callback) {
+      ipcRenderer.on('orb:appearance', (_event, appearance) => callback(appearance))
+    },
   },
 })

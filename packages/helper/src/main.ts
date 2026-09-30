@@ -2,7 +2,7 @@
  * Floating ball window. The official dsh process owns the session; this process only draws and forwards one socket.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell } from 'electron'
 import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +14,14 @@ import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
 const socketAddress = process.env.DSH_ORB_SOCKET ?? ''
 const token = process.env.DSH_ORB_TOKEN ?? ''
 const webPort = process.env.DSH_ORB_WEB_PORT ?? ''
+
+/** Theme preference as stored by the official ui-theme settings section. */
+type ThemeSource = 'light' | 'dark' | 'system'
+
+interface Appearance {
+  theme?: ThemeSource
+  locale?: string
+}
 
 interface ChromeState {
   overlay: MenuSelection
@@ -39,6 +47,9 @@ let chrome: ChromeState = {
   catalog: { groups: [] },
 }
 let avatarToken = 0
+// Raw preferences as stored; `theme` resolves through nativeTheme, an absent
+// locale falls back to the system languages.
+let appearance: Appearance = readAppearanceEnv()
 
 process.title = 'dsh-orb-helper'
 
@@ -51,7 +62,7 @@ if (process.platform === 'darwin') app.setActivationPolicy?.('accessory')
 
 let win: BrowserWindow | undefined
 let tccWait: ((status: unknown) => void) | undefined
-let overlays: { deliver(message: unknown): boolean } | undefined
+let overlays: { appearance(payload: { dark: boolean; locale: 'zh' | 'en' }): void; deliver(message: unknown): boolean } | undefined
 let placement: FloatingPlacement | undefined
 let live: Socket | undefined
 let quitting = false
@@ -79,7 +90,12 @@ void app.whenReady().then(async () => {
   }, () => screen.getAllDisplays().map((display) => display.bounds))
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isVisible()) win.showInactive()
+    // The page may have loaded after the last appearance change.
+    pushAppearance()
   })
+  // OS scheme flips ride through while the theme preference is `system`.
+  nativeTheme.on('updated', () => { pushAppearance() })
+  applyAppearance()
   await win.loadFile(fileURLToPath(new URL('../assets/floating.html', import.meta.url)))
   connect(0)
 })
@@ -331,6 +347,13 @@ function deliver(message: unknown): void {
     chrome = readChrome(record)
     return
   }
+  if (record.type === 'appearance') {
+    const next = readAppearanceMessage(message)
+    if (next.theme !== undefined) appearance.theme = next.theme
+    if (next.locale !== undefined) appearance.locale = next.locale
+    applyAppearance()
+    return
+  }
   if (record.type === 'avatar') {
     const version = (record as { version?: unknown }).version
     void loadAvatar(typeof version === 'number' ? version : 0)
@@ -390,6 +413,63 @@ function zhLocale(): boolean {
   return locale.toLowerCase().startsWith('zh')
 }
 
+/** Appearance seed from the host: the preferences as of helper launch. */
+function readAppearanceEnv(): Appearance {
+  const raw = process.env.DSH_ORB_APPEARANCE
+  if (typeof raw !== 'string' || raw.length > 200) return {}
+  try {
+    return readAppearanceMessage(JSON.parse(raw))
+  } catch {
+    return {}
+  }
+}
+
+function themeSourceOr(value: unknown, fallback: ThemeSource | undefined): ThemeSource | undefined {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : fallback
+}
+
+/** Accept only well-formed preference fields; anything else keeps the current value. */
+function readAppearanceMessage(value: unknown): Appearance {
+  if (typeof value !== 'object' || value === null) return {}
+  const record = value as { theme?: unknown; locale?: unknown }
+  const theme = themeSourceOr(record.theme, undefined)
+  return {
+    ...(theme === undefined ? {} : { theme }),
+    ...(typeof record.locale === 'string' && record.locale.length > 0 && record.locale.length <= 35
+      ? { locale: record.locale }
+      : {}),
+  }
+}
+
+/**
+ * The UI language the ball mirrors: an explicit Host locale that names one of
+ * the shipped languages wins, otherwise follow the system like the web client
+ * falls back to its browser detection.
+ */
+function uiLanguage(): 'zh' | 'en' {
+  const preference = typeof appearance.locale === 'string' ? appearance.locale.toLowerCase() : ''
+  if (preference.startsWith('zh')) return 'zh'
+  if (preference.startsWith('en')) return 'en'
+  return zhLocale() ? 'zh' : 'en'
+}
+
+/** Menu and dialog copy follow the mirrored language, not the raw system locale. */
+function menuZh(): boolean {
+  return uiLanguage() === 'zh'
+}
+
+/** Point the helper's theme at the stored preference and push the resolved state. */
+function applyAppearance(): void {
+  nativeTheme.themeSource = appearance.theme ?? 'system'
+  pushAppearance()
+}
+
+function pushAppearance(): void {
+  const payload = { dark: nativeTheme.shouldUseDarkColors, locale: uiLanguage() }
+  if (win && !win.isDestroyed()) win.webContents.send('orb:appearance', payload)
+  overlays?.appearance(payload)
+}
+
 function readChrome(value: unknown): ChromeState {
   const record = value as {
     overlay?: MenuSelection
@@ -415,7 +495,7 @@ function selectionOr(value: MenuSelection | undefined, fallback: MenuSelection):
 }
 
 async function showMenu(window: BrowserWindow): Promise<void> {
-  const template = contextMenuTemplate(chrome, zhLocale(), {
+  const template = contextMenuTemplate(chrome, menuZh(), {
     openMain: () => { write({ type: 'open-main' }) },
     setOverlay: (selection) => { write({ type: 'set-overlay', selection }) },
     setBackground: (selection) => { write({ type: 'set-background', selection }) },
@@ -428,7 +508,7 @@ async function showMenu(window: BrowserWindow): Promise<void> {
 
 async function confirmMillifraction(window: BrowserWindow, enabled: boolean): Promise<void> {
   if (enabled === chrome.millifractionEnabled) return
-  const zh = zhLocale()
+  const zh = menuZh()
   const { response } = await dialog.showMessageBox(window, {
     type: 'question',
     message: zh ? '新编码只在新对话中生效。' : 'The new encoding takes effect in a new conversation.',

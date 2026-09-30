@@ -22,13 +22,22 @@ interface OverlayDeps {
   write: (message: unknown) => void
 }
 
+/** Resolved appearance state mirrored onto the overlay pages. */
+export interface OverlayAppearance {
+  dark: boolean
+  locale: 'zh' | 'en'
+}
+
 export function denyWindowPermissions(created: BrowserWindow): void {
   created.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => {
     callback(false)
   })
 }
 
-export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(message: unknown): boolean }> {
+export async function attachOverlays(deps: OverlayDeps): Promise<{
+  appearance(payload: OverlayAppearance): void
+  deliver(message: unknown): boolean
+}> {
   const preload = fileURLToPath(new URL('../selection-preload.cjs', import.meta.url))
   const toolbar = openToolbar(preload)
   const frame = openFrame()
@@ -98,6 +107,10 @@ export async function attachOverlays(deps: OverlayDeps): Promise<{ deliver(messa
   }
 
   return {
+    /** Mirror the ball's theme and UI language onto the selection toolbar. */
+    appearance(payload: OverlayAppearance): void {
+      if (!toolbar.isDestroyed()) toolbar.webContents.send('orb:appearance', payload)
+    },
     deliver(message: unknown): boolean {
       if (typeof message !== 'object' || message === null) return false
       const record = message as {

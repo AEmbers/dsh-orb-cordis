@@ -460,6 +460,21 @@ describe('ball control socket', { concurrency: 1 }, () => {
     }
   })
 
+  it('delivers the stored theme and locale to a connecting ball and on change', async () => {
+    const harness = boot()
+    harness.runtime.setAppearance({ theme: 'dark', locale: 'zh' })
+    const client = await connect(harness.runtime)
+    try {
+      const initial = client.messages.find((message) => message.type === 'appearance')
+      assert.deepEqual(initial, { type: 'appearance', theme: 'dark', locale: 'zh' })
+      harness.runtime.setAppearance({ theme: 'light', locale: 'zh' })
+      await waitFor(() => client.messages.some((message) => message.type === 'appearance' && message.theme === 'light'))
+    } finally {
+      client.socket.destroy()
+      harness.runtime.halt()
+    }
+  })
+
   it('returns a pending question to the main window when the ball disconnects', async () => {
     const harness = boot()
     const client = await connect(harness.runtime)

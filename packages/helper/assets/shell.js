@@ -111,9 +111,22 @@ const en = {
 }
 
 const PROMPT_LIMIT = 8000
-const messages = navigator.language.toLowerCase().startsWith('zh') ? zh : en
-const chatLabels = toolLabels(messages === zh)
-const usageText = usageLabels(messages === zh)
+// The UI language mirrors the main window's, delivered on the appearance
+// message; until it arrives the page follows the system like the web client.
+let messages = (navigator.language || '').toLowerCase().startsWith('zh') ? zh : en
+let chatLabels = toolLabels(messages === zh)
+let usageText = usageLabels(messages === zh)
+
+/** Switch the page dictionary; refreshers re-render from the new one. */
+function applyLocale(locale) {
+  if (locale !== 'zh' && locale !== 'en') return
+  const next = locale === 'zh' ? zh : en
+  if (next === messages) return
+  messages = next
+  chatLabels = toolLabels(messages === zh)
+  usageText = usageLabels(messages === zh)
+  document.documentElement.lang = locale
+}
 
 function applyColorScheme(dark) {
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
@@ -200,21 +213,13 @@ function permissionText(preset) {
 
 function main() {
   document.documentElement.lang = messages === zh ? 'zh' : 'en'
-  document.querySelector('#page-title').textContent = messages.title
   const stop = document.querySelector('#stop')
-  stop.setAttribute('aria-label', messages.stop)
-  stop.title = messages.stop
   const newConversation = document.querySelector('#new-conversation')
-  newConversation.setAttribute('aria-label', messages.fresh)
-  newConversation.title = messages.fresh
   const historyButton = document.querySelector('#history')
-  historyButton.setAttribute('aria-label', messages.history)
-  historyButton.title = messages.history
   const permissionRoot = document.querySelector('#permission')
   const permissionButton = document.querySelector('#permission-button')
   const permissionLabel = document.querySelector('#permission-label')
   const permissionMenu = document.querySelector('#permission-menu')
-  document.querySelector('#input-label').textContent = messages.placeholder
   const ball = document.querySelector('#ball')
   const dockTab = document.querySelector('#dock-tab')
   const panel = document.querySelector('#panel')
@@ -237,13 +242,7 @@ function main() {
   const status = document.querySelector('#status')
   const prompt = document.querySelector('#prompt')
   const composer = document.querySelector('#composer')
-  prompt.dataset.placeholder = messages.placeholder
-  questionCancel.textContent = messages.cancel
-  questionSkip.textContent = messages.skip
-  questionPrev.setAttribute('aria-label', messages.prev)
-  questionNextNav.setAttribute('aria-label', messages.next)
-  questionPrev.textContent = '‹'
-  questionNextNav.textContent = '›'
+  applyStaticText()
 
   let expanded = false
   let pinned = false
@@ -273,6 +272,83 @@ function main() {
   let avatarSrc = 'deepseek-avatar-square.gif'
   let historyItems = []
   const blocks = new Map()
+  // Last message per block key: the locale refresh re-renders from it.
+  const blockData = new Map()
+  let lastTccStatus
+
+  /**
+   * Re-apply every static label. Called at startup and on locale changes;
+   * dynamic regions (permission, history, question, TCC gate, transcript) are
+   * refreshed separately from their stored state.
+   */
+  function applyStaticText() {
+    document.querySelector('#page-title').textContent = messages.title
+    const stopButton = document.querySelector('#stop')
+    stopButton.setAttribute('aria-label', messages.stop)
+    stopButton.title = messages.stop
+    const newConversationButton = document.querySelector('#new-conversation')
+    newConversationButton.setAttribute('aria-label', messages.fresh)
+    newConversationButton.title = messages.fresh
+    const historyToggle = document.querySelector('#history')
+    historyToggle.setAttribute('aria-label', messages.history)
+    historyToggle.title = messages.history
+    document.querySelector('#input-label').textContent = messages.placeholder
+    prompt.dataset.placeholder = messages.placeholder
+    questionCancel.textContent = messages.cancel
+    questionSkip.textContent = messages.skip
+    questionPrev.setAttribute('aria-label', messages.prev)
+    questionNextNav.setAttribute('aria-label', messages.next)
+    questionPrev.textContent = '‹'
+    questionNextNav.textContent = '›'
+    const chipDismiss = document.querySelector('#selection-chip-dismiss')
+    chipDismiss.setAttribute('aria-label', messages.chipDismiss)
+    chipDismiss.title = messages.chipDismiss
+    document.querySelector('#tcc-screen-name').textContent = messages.tccScreenName
+    document.querySelector('#tcc-screen-reason').textContent = messages.tccScreenReason
+    document.querySelector('#tcc-screen-path').textContent = messages.tccScreenPath
+    document.querySelector('#tcc-screen-open').textContent = messages.tccScreenOpen
+    document.querySelector('#tcc-accessibility-name').textContent = messages.tccAccessibilityName
+    document.querySelector('#tcc-accessibility-reason').textContent = messages.tccAccessibilityReason
+    document.querySelector('#tcc-accessibility-path').textContent = messages.tccAccessibilityPath
+    document.querySelector('#tcc-accessibility-open').textContent = messages.tccAccessibilityOpen
+    document.querySelector('#tcc-title').textContent = messages.tccTitle
+    document.querySelector('#tcc-later').textContent = messages.tccLater
+    const tccClose = document.querySelector('#tcc-dismiss')
+    tccClose.setAttribute('aria-label', messages.tccDismiss)
+    tccClose.title = messages.tccDismiss
+    for (const option of permissionMenu.querySelectorAll('button')) {
+      option.textContent = permissionText(option.dataset.preset)
+    }
+  }
+
+  /** Re-render every text surface after the dictionary switched. */
+  function refreshAllText() {
+    applyStaticText()
+    renderPermission()
+    renderHistory()
+    if (pending !== undefined) renderQuestion()
+    if (tccGateVisible && lastTccStatus) showTccGate(lastTccStatus)
+    refreshProcessLabel(processGroup)
+    refreshTranscriptLocale()
+  }
+
+  /** Locale-dependent labels inside the transcript, from the stored messages. */
+  function refreshTranscriptLocale() {
+    for (const [key, node] of blocks) {
+      const block = blockData.get(key)
+      if (block === undefined) continue
+      if (block.kind === 'user') continue
+      if (block.kind === 'reasoning') {
+        node.querySelector('.think-title').textContent = messages.think
+        node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
+      } else if (block.kind === 'tool') {
+        updateToolNode(node, block)
+      } else {
+        updateAssistantNode(node, block)
+      }
+    }
+    refreshProcessLabel(processGroup)
+  }
 
   function pageClosed() {
     return globalThis.document?.body == null
@@ -1347,6 +1423,7 @@ function main() {
 
   function upsertBlock(block) {
     if (typeof block?.key !== 'string' || typeof block.text !== 'string') return
+    blockData.set(block.key, block)
     let node = blocks.get(block.key)
     if (node === undefined) {
       if (block.kind === 'user') {
@@ -1438,6 +1515,7 @@ function main() {
     const node = blocks.get(key)
     if (node === undefined) return
     blocks.delete(key)
+    blockData.delete(key)
     node.remove()
   }
 
@@ -1469,6 +1547,7 @@ function main() {
     stopProcessClock()
     processGroup = undefined
     blocks.clear()
+    blockData.clear()
     transcript.replaceChildren()
     pending = undefined
     syncQuestion()
@@ -1793,8 +1872,6 @@ function main() {
   const selectionChipText = document.querySelector('#selection-chip-text')
   const selectionChipDismiss = document.querySelector('#selection-chip-dismiss')
   selectionChipDismiss.textContent = '\u00d7'
-  selectionChipDismiss.setAttribute('aria-label', messages.chipDismiss)
-  selectionChipDismiss.title = messages.chipDismiss
   const tccGate = document.querySelector('#tcc-gate')
   const tccDismiss = document.querySelector('#tcc-dismiss')
   const tccTitle = document.querySelector('#tcc-title')
@@ -1805,19 +1882,7 @@ function main() {
   const tccAccessibilityOpen = document.querySelector('#tcc-accessibility-open')
   const tccFooter = document.querySelector('#tcc-footer')
   const tccLater = document.querySelector('#tcc-later')
-  document.querySelector('#tcc-screen-name').textContent = messages.tccScreenName
-  document.querySelector('#tcc-screen-reason').textContent = messages.tccScreenReason
-  document.querySelector('#tcc-screen-path').textContent = messages.tccScreenPath
-  tccScreenOpen.textContent = messages.tccScreenOpen
-  document.querySelector('#tcc-accessibility-name').textContent = messages.tccAccessibilityName
-  document.querySelector('#tcc-accessibility-reason').textContent = messages.tccAccessibilityReason
-  document.querySelector('#tcc-accessibility-path').textContent = messages.tccAccessibilityPath
-  tccAccessibilityOpen.textContent = messages.tccAccessibilityOpen
-  tccTitle.textContent = messages.tccTitle
-  tccLater.textContent = messages.tccLater
   tccDismiss.textContent = '\u00d7'
-  tccDismiss.setAttribute('aria-label', messages.tccDismiss)
-  tccDismiss.title = messages.tccDismiss
   document.querySelector('#tcc-relaunch').hidden = true
 
   function setAttachedSelection(text) {
@@ -1849,6 +1914,7 @@ function main() {
 
   function showTccGate(tccStatus) {
     tccGateVisible = true
+    lastTccStatus = tccStatus
     const name = typeof tccStatus.appName === 'string' ? tccStatus.appName : ''
     tccApp.textContent = messages.tccAppHint.replaceAll('{name}', name)
     tccFooter.textContent = messages.tccFooter.replaceAll('{name}', name)
@@ -2028,6 +2094,16 @@ function main() {
     syncGif()
   })
   api.onStatus((text) => { status.textContent = typeof text === 'string' ? text : '' })
+  // The theme arrives as the helper's nativeTheme (the prefers-color-scheme
+  // query above follows it); the locale switches the whole page dictionary.
+  if (typeof api.onAppearance === 'function') {
+    api.onAppearance((appearance) => {
+      if (appearance !== null && typeof appearance === 'object') {
+        applyLocale(appearance.locale)
+        refreshAllText()
+      }
+    })
+  }
   transcript.addEventListener('click', (event) => {
     const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null
     if (anchor === null) return

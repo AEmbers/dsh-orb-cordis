@@ -65,6 +65,7 @@ function loadSection() {
   const sandbox = {
     window: { confirm: () => confirm },
     document: {
+      documentElement: { lang: '' },
       getElementById: () => null,
       head: { append() {} },
       createElement(tag) {
@@ -133,6 +134,7 @@ function loadSection() {
     setMode(next) { mode = next },
     setConfirm(next) { confirm = next },
     setFile(next) { file = next },
+    setLang(next) { sandbox.document.documentElement.lang = next },
     reset() {
       stateSlots.length = 0
       effects.length = 0
@@ -220,6 +222,17 @@ describe('settings section', () => {
     const client = readFileSync(join(here, '../client.js'), 'utf8')
     assert.match(client, /在其他应用里选中文字会出现搜索、翻译和发给 Agent/)
     assert.equal(client.includes('authenticatedUrl'), false)
+  })
+
+  it('follows the main window locale on <html lang>', () => {
+    const page = loadSection()
+    assert.equal(page.spec.label(), '悬浮球', 'zh-CN navigator with no lang stays Chinese')
+    page.setLang('en')
+    assert.equal(page.spec.label(), 'Floating ball')
+    page.setLang('zh-CN')
+    assert.equal(page.spec.label(), '悬浮球')
+    page.setLang('')
+    assert.equal(page.spec.label(), '悬浮球', 'no lang falls back to the browser languages')
   })
 })
 

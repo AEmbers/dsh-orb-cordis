@@ -9,6 +9,7 @@ import { createServer, type Server, type Socket } from 'node:net'
 import { dirname, resolve } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { Appearance, ThemePreference } from './appearance.ts'
 import { normalizeCatalog } from './catalog.ts'
 import { resolveElectronBinary } from './electron-runtime.ts'
 import { helperMain } from './helper-path.ts'
@@ -116,6 +117,11 @@ export interface OrbContext {
     }) => void,
     options?: { readonly global?: boolean },
   ): (() => void) | void
+  on(
+    name: 'settings/document-updated',
+    listener: (ns: unknown, revision: unknown) => void,
+  ): (() => void) | void
+  on(name: string, listener: (...args: unknown[]) => void): (() => void) | void
 }
 
 interface QuestionRequest {
@@ -226,6 +232,7 @@ export class OrbRuntime {
   /** Keys of the newest settled assistant message: the turn's final answer so far. */
   private responseKeys: string[] = []
   private helperPid: number | undefined
+  private appearance: Appearance = {}
   private readonly overlayWaiters = new Map<string, () => void>()
   private readonly tcc: { status(): TccStatus; open(right: TccRight): Promise<void> }
   private readonly selection: SelectionController
@@ -523,6 +530,7 @@ export class OrbRuntime {
       }
     }
     this.send(socket, { type: 'turn', running: this.turnRunning })
+    if (Object.keys(this.appearance).length > 0) this.send(socket, { type: 'appearance', ...this.appearance })
     if (this.pending) this.send(socket, this.questionPayload(this.pending.id))
     void this.publishChrome()
     this.selection.sync()
@@ -1113,6 +1121,9 @@ export class OrbRuntime {
       DSH_ORB_TOKEN: this.token,
       DSH_ORB_SOCKET: `127.0.0.1:${this.port}`,
       DSH_ORB_WEB_PORT: String(this.ctx.webServer.port),
+      ...(Object.keys(this.appearance).length > 0
+        ? { DSH_ORB_APPEARANCE: JSON.stringify(this.appearance) }
+        : {}),
     }
     delete env.ELECTRON_RUN_AS_NODE
     const child = spawn(this.binary, [`--user-data-dir=${userData}`, helperMain()], {
@@ -1197,6 +1208,20 @@ export class OrbRuntime {
       catalog,
     })
     this.broadcast({ type: 'avatar', version: Math.trunc(this.store.avatarVersion()) })
+  }
+
+  /**
+   * Store the theme/locale preferences the ball mirrors and push them to a
+   * connected helper. The raw preference travels; the helper resolves
+   * `system` and an absent locale against its own environment.
+   */
+  setAppearance(appearance: Appearance): void {
+    const next: Appearance = {
+      ...(appearance.theme === undefined ? {} : { theme: appearance.theme }),
+      ...(appearance.locale === undefined ? {} : { locale: appearance.locale }),
+    }
+    this.appearance = next
+    if (Object.keys(next).length > 0) this.broadcast({ type: 'appearance', ...next })
   }
 
   async setOverlayModel(selection: AgentModelSelection): Promise<void> {

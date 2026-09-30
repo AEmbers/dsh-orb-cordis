@@ -7,6 +7,15 @@
   --hover: #ececf0;
 }
 
+/* Dark palette mirrors the ball shell (floating.css body[data-ds-dark-theme]). */
+body[data-ds-dark-theme] {
+  color-scheme: dark;
+  --panel-bg: rgb(35, 35, 36);
+  --text: rgb(249, 250, 251);
+  --border: rgba(255, 255, 255, 0.16);
+  --hover: rgb(60, 60, 61);
+}
+
 html,
 body {
   margin: 0;

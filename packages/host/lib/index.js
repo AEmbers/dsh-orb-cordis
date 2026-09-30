@@ -751,6 +751,66 @@ function isOrbWorkspace(cwd, orbCwd) {
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 //#endregion
+//#region src/appearance.ts
+function describeSettings(settings) {
+	const describe = settings?.describe;
+	if (typeof describe !== "function") return [];
+	try {
+		const rows = describe.call(settings);
+		return Array.isArray(rows) ? rows : [];
+	} catch {
+		return [];
+	}
+}
+/** Read the stored theme and locale preferences; unusable sections stay absent. */
+function readAppearance(settings) {
+	const appearance = {};
+	for (const row of describeSettings(settings)) {
+		if (row?.ns === "ui-theme") {
+			const preference = row.value?.preference;
+			if (preference === "light" || preference === "dark" || preference === "system") appearance.theme = preference;
+		}
+		if (row?.ns === "locale" && typeof row.value?.preference === "string") {
+			const preference = row.value.preference;
+			if (preference.length > 0 && preference.length <= 35) appearance.locale = preference;
+		}
+	}
+	return appearance;
+}
+function sameAppearance(left, right) {
+	return left.theme === right.theme && left.locale === right.locale;
+}
+/**
+* Follow the live settings document: read once, then re-read whenever the
+* theme or locale namespace changes. `settings/document-updated` fires for
+* every namespace and describe() itself emits it, so the read is guarded
+* against re-entry.
+*/
+function watchAppearance(ctx, onChange) {
+	const settings = ctx.get("settings");
+	if (typeof settings?.describe !== "function") return () => {};
+	let reading = false;
+	const read = () => {
+		if (reading) return {};
+		reading = true;
+		try {
+			return readAppearance(settings);
+		} finally {
+			reading = false;
+		}
+	};
+	let current = read();
+	onChange({ ...current });
+	const detach = ctx.on("settings/document-updated", (ns) => {
+		if (ns !== "ui-theme" && ns !== "locale") return;
+		const next = read();
+		if (sameAppearance(next, current)) return;
+		current = next;
+		onChange({ ...current });
+	});
+	return typeof detach === "function" ? detach : () => {};
+}
+//#endregion
 //#region src/electron-runtime.ts
 /**
 * Locate the generic Electron binary used to open the ball.
@@ -1482,6 +1542,7 @@ var OrbRuntime = class {
 	/** Keys of the newest settled assistant message: the turn's final answer so far. */
 	responseKeys = [];
 	helperPid;
+	appearance = {};
 	overlayWaiters = /* @__PURE__ */ new Map();
 	tcc;
 	selection;
@@ -1797,6 +1858,10 @@ var OrbRuntime = class {
 		this.send(socket, {
 			type: "turn",
 			running: this.turnRunning
+		});
+		if (Object.keys(this.appearance).length > 0) this.send(socket, {
+			type: "appearance",
+			...this.appearance
 		});
 		if (this.pending) this.send(socket, this.questionPayload(this.pending.id));
 		this.publishChrome();
@@ -2371,7 +2436,8 @@ var OrbRuntime = class {
 			...process.env,
 			DSH_ORB_TOKEN: this.token,
 			DSH_ORB_SOCKET: `127.0.0.1:${this.port}`,
-			DSH_ORB_WEB_PORT: String(this.ctx.webServer.port)
+			DSH_ORB_WEB_PORT: String(this.ctx.webServer.port),
+			...Object.keys(this.appearance).length > 0 ? { DSH_ORB_APPEARANCE: JSON.stringify(this.appearance) } : {}
 		};
 		delete env.ELECTRON_RUN_AS_NODE;
 		const child = spawn(this.binary, [`--user-data-dir=${userData}`, helperMain()], {
@@ -2458,6 +2524,22 @@ var OrbRuntime = class {
 		this.broadcast({
 			type: "avatar",
 			version: Math.trunc(this.store.avatarVersion())
+		});
+	}
+	/**
+	* Store the theme/locale preferences the ball mirrors and push them to a
+	* connected helper. The raw preference travels; the helper resolves
+	* `system` and an absent locale against its own environment.
+	*/
+	setAppearance(appearance) {
+		const next = {
+			...appearance.theme === void 0 ? {} : { theme: appearance.theme },
+			...appearance.locale === void 0 ? {} : { locale: appearance.locale }
+		};
+		this.appearance = next;
+		if (Object.keys(next).length > 0) this.broadcast({
+			type: "appearance",
+			...next
 		});
 	}
 	async setOverlayModel(selection) {
@@ -2971,6 +3053,9 @@ function apply(ctx, config = {}) {
 			tcc,
 			control: runtime
 		});
+		const detachAppearance = watchAppearance(ctx, (appearance) => {
+			runtime.setAppearance(appearance);
+		});
 		if (process.platform !== "linux" && config.autoStart !== false && store.ballEnabled()) runtime.start().catch((error) => {
 			console.error(`dsh-orb: ${error instanceof Error ? error.message : String(error)}`);
 		});
@@ -2978,6 +3063,7 @@ function apply(ctx, config = {}) {
 			detachQuestions();
 			detachPermissions();
 			detachRoutes();
+			detachAppearance();
 			runtime.halt();
 		};
 	});
