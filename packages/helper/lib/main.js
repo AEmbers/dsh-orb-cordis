@@ -2,6 +2,27 @@ import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeTheme, scre
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
+//#region src/avatar.ts
+/**
+* Avatar messages from the host.
+* The host owns what the avatar is; the helper only turns that into something the
+* ball page can load: a relative asset path, the uploaded bytes, or nothing (the
+* GIF that ships with the page).
+*/
+/** `kind: 'preset'` sources: a plain relative GIF path, never a URL scheme or a parent hop. */
+const PRESET_SRC = /^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9_-]+)*\.gif$/;
+function readAvatarChoice(record) {
+	if (record.kind === "preset" && typeof record.src === "string" && PRESET_SRC.test(record.src)) return {
+		kind: "preset",
+		src: record.src
+	};
+	const version = typeof record.version === "number" && Number.isFinite(record.version) ? Math.trunc(record.version) : 0;
+	if (record.kind === "custom" && version > 0) return {
+		kind: "custom",
+		version
+	};
+	return { kind: "default" };
+}
 const PANEL_SIZE = {
 	width: 320,
 	height: 420
@@ -1266,8 +1287,7 @@ function deliver(message) {
 		return;
 	}
 	if (record.type === "avatar") {
-		const version = record.version;
-		loadAvatar(typeof version === "number" ? version : 0);
+		loadAvatar(readAvatarChoice(record));
 		return;
 	}
 	if (record.type === "tcc") {
@@ -1427,14 +1447,18 @@ async function confirmMillifraction(window, enabled) {
 		enabled
 	});
 }
-async function loadAvatar(version) {
+async function loadAvatar(choice) {
 	const tokenId = ++avatarToken;
 	if (!win) return;
-	if (!version) {
+	if (choice.kind === "preset") {
+		win.webContents.send("orb:avatar", choice.src);
+		return;
+	}
+	if (choice.kind === "default") {
 		win.webContents.send("orb:avatar", "");
 		return;
 	}
-	const image = await fetchAvatar(version);
+	const image = await fetchAvatar(choice.version);
 	if (tokenId !== avatarToken || !win || !image) return;
 	win.webContents.send("orb:avatar", `data:${image.mime};base64,${image.body.toString("base64")}`);
 }

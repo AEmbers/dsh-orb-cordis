@@ -2,10 +2,10 @@ import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { accessibilityTrusted, promptAccessibility, selectionRuntimeAvailable, startSelectionMonitor } from "@dsh-orb/native-selection";
-import { fileURLToPath } from "node:url";
 import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { createServer } from "node:net";
 import { pipeline } from "node:stream/promises";
@@ -100,6 +100,83 @@ function openExternal(url) {
 			else reject(/* @__PURE__ */ new Error(`open exited ${code ?? "unknown"}`));
 		});
 	});
+}
+//#endregion
+//#region src/helper-path.ts
+/**
+* Where the helper's files are.
+* Installed `dsh-orb` keeps them next to this file: `dist/host/index.js` and `dist/helper/lib/main.js`.
+* In the workspace the helper is a separate package that Node resolves by name.
+*/
+const require = createRequire(import.meta.url);
+/** Root folder of the helper: holds `lib/`, `assets/` and the preload scripts. */
+function helperRoot() {
+	const assembled = fileURLToPath(new URL("../helper", import.meta.url));
+	if (existsSync(join(assembled, "lib", "main.js"))) return assembled;
+	return dirname(require.resolve("@dsh-orb/helper/package.json"));
+}
+/** Electron entry script of the helper. */
+function helperMain() {
+	return join(helperRoot(), "lib", "main.js");
+}
+/** Bundled default avatar. */
+function defaultAvatarPath() {
+	return join(helperRoot(), "assets", "deepseek-avatar-square.gif");
+}
+/** Built-in avatar GIFs. The ball loads them from disk, the settings page over the route. */
+function presetAvatarDir() {
+	return join(helperRoot(), "assets", "avatars");
+}
+//#endregion
+//#region src/avatar-presets.ts
+/**
+* Built-in ball avatars.
+* The files are animated GIFs in the helper's `assets/avatars`. The ball picks one
+* by relative path (a data URL would have to carry megabytes through the socket),
+* while the settings page reads the same files through the avatar route.
+*/
+/** Gallery order is this order. */
+const AVATAR_PRESETS = [
+	{
+		id: "point",
+		file: "point.gif"
+	},
+	{
+		id: "rice",
+		file: "rice.gif"
+	},
+	{
+		id: "heart",
+		file: "heart.gif"
+	},
+	{
+		id: "cheer",
+		file: "cheer.gif"
+	},
+	{
+		id: "cheeks",
+		file: "cheeks.gif"
+	},
+	{
+		id: "smile",
+		file: "smile.gif"
+	}
+];
+function findAvatarPreset(id) {
+	return AVATAR_PRESETS.find((preset) => preset.id === id);
+}
+function isAvatarPresetId(value) {
+	return typeof value === "string" && findAvatarPreset(value) !== void 0;
+}
+/** Absolute path of a shipped preset. Unknown ids resolve to nothing, so a request cannot walk the disk. */
+function avatarPresetPath(id) {
+	const preset = findAvatarPreset(id);
+	return preset === void 0 ? void 0 : join(presetAvatarDir(), preset.file);
+}
+/** Source the ball page reads, relative to the ball's own document. */
+function avatarPresetSrc(id) {
+	const preset = findAvatarPreset(id);
+	return preset === void 0 ? void 0 : `avatars/${preset.file}`;
 }
 //#endregion
 //#region src/preferences.ts
@@ -232,12 +309,29 @@ var ProfileStore = class {
 		this.ballValue = enabled;
 		writeJson(join(this.dir, BALL_FILE), { enabled });
 	}
+	/** Bumped by every avatar change: the ball refetches on it, the settings preview re-renders on it. */
 	avatarVersion() {
-		try {
-			return statSync(join(this.dir, AVATAR_FILE)).mtimeMs;
-		} catch {
-			return 0;
-		}
+		for (const name of [AVATAR_META_FILE, AVATAR_FILE]) try {
+			return statSync(join(this.dir, name)).mtimeMs;
+		} catch {}
+		return 0;
+	}
+	/**
+	* Avatar the profile currently shows, checked against what is on disk.
+	* An unknown preset id or a half-written upload falls back to the shipped GIF.
+	*/
+	avatarSelection() {
+		const preset = record(readJson$1(join(this.dir, AVATAR_META_FILE)))?.preset;
+		if (isAvatarPresetId(preset)) return {
+			kind: "preset",
+			id: preset
+		};
+		const custom = this.readAvatar();
+		if (custom !== void 0) return {
+			kind: "custom",
+			mime: custom.mime
+		};
+		return { kind: "default" };
 	}
 	readAvatar() {
 		let bytes;
@@ -255,16 +349,23 @@ var ProfileStore = class {
 			mime: declared ?? sniffed
 		};
 	}
+	/** One avatar per profile: an uploaded image drops the preset pick and the other way round. */
 	writeAvatar(bytes, mime) {
 		writeBytes(join(this.dir, AVATAR_FILE), bytes);
-		writeJson(join(this.dir, AVATAR_META_FILE), { mime });
+		writeJson(join(this.dir, AVATAR_META_FILE), {
+			kind: "custom",
+			mime
+		});
+	}
+	selectAvatarPreset(id) {
+		writeJson(join(this.dir, AVATAR_META_FILE), {
+			kind: "preset",
+			preset: id
+		});
+		removeIfPresent(join(this.dir, AVATAR_FILE));
 	}
 	restoreAvatar() {
-		for (const name of [AVATAR_FILE, AVATAR_META_FILE]) try {
-			unlinkSync(join(this.dir, name));
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
+		for (const name of [AVATAR_FILE, AVATAR_META_FILE]) removeIfPresent(join(this.dir, name));
 	}
 	writeModels() {
 		writeJson(join(this.dir, MODELS_FILE), {
@@ -376,6 +477,13 @@ function writeBytes(file, bytes) {
 	writeFileSync(tmp, bytes);
 	renameSync(tmp, file);
 }
+function removeIfPresent(file) {
+	try {
+		unlinkSync(file);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+}
 function isEnoent(error) {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
@@ -432,28 +540,6 @@ function asRecord$2(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 //#endregion
-//#region src/helper-path.ts
-/**
-* Where the helper's files are.
-* Installed `dsh-orb` keeps them next to this file: `dist/host/index.js` and `dist/helper/lib/main.js`.
-* In the workspace the helper is a separate package that Node resolves by name.
-*/
-const require = createRequire(import.meta.url);
-/** Root folder of the helper: holds `lib/`, `assets/` and the preload scripts. */
-function helperRoot() {
-	const assembled = fileURLToPath(new URL("../helper", import.meta.url));
-	if (existsSync(join(assembled, "lib", "main.js"))) return assembled;
-	return dirname(require.resolve("@dsh-orb/helper/package.json"));
-}
-/** Electron entry script of the helper. */
-function helperMain() {
-	return join(helperRoot(), "lib", "main.js");
-}
-/** Bundled default avatar. */
-function defaultAvatarPath() {
-	return join(helperRoot(), "assets", "deepseek-avatar-square.gif");
-}
-//#endregion
 //#region src/routes.ts
 /**
 * Settings routes on the official web port.
@@ -498,6 +584,14 @@ async function handle(deps, req, res) {
 	}
 	if ((method === "GET" || method === "HEAD") && path === `${PREFIX}/avatar`) {
 		await sendAvatar(deps.store, method, res);
+		return;
+	}
+	if ((method === "GET" || method === "HEAD") && path.startsWith(`${PREFIX}/avatar/preset/`)) {
+		const file = avatarPresetPath(decodeURIComponent(path.slice(`${PREFIX}/avatar/preset/`.length)));
+		if (file === void 0 || !await sendFile(res, method, file, "image/gif")) {
+			res.writeHead(404);
+			res.end();
+		}
 		return;
 	}
 	if (!orbSupported()) {
@@ -573,6 +667,17 @@ async function handle(deps, req, res) {
 		sendJson(res, 200, await snapshot(deps));
 		return;
 	}
+	if (method === "POST" && path === `${PREFIX}/avatar/preset`) {
+		const preset = asRecord$1(await readJson(req))?.preset;
+		if (!isAvatarPresetId(preset)) {
+			sendJson(res, 400, { error: "invalid-preset" });
+			return;
+		}
+		deps.store.selectAvatarPreset(preset);
+		await deps.control.publishChrome();
+		sendJson(res, 200, await snapshot(deps));
+		return;
+	}
 	if (method === "POST" && path === `${PREFIX}/avatar/restore`) {
 		deps.store.restoreAvatar();
 		await deps.control.publishChrome();
@@ -595,10 +700,16 @@ async function handle(deps, req, res) {
 async function snapshot(deps) {
 	const models = deps.store.models();
 	const version = Math.trunc(deps.store.avatarVersion());
+	const selection = deps.store.avatarSelection();
 	return {
 		supported: orbSupported(),
 		ballEnabled: deps.store.ballEnabled(),
 		avatarUrl: `${PREFIX}/avatar?v=${version}`,
+		avatarPresetId: selection.kind === "preset" ? selection.id : null,
+		avatarPresets: AVATAR_PRESETS.map((preset) => ({
+			id: preset.id,
+			url: `${PREFIX}/avatar/preset/${preset.id}`
+		})),
 		overlay: models.overlay,
 		background: models.background,
 		selectionEnabled: deps.store.selectionEnabled(),
@@ -617,18 +728,34 @@ async function catalog(deps) {
 		return { groups: [] };
 	}
 }
+/** The profile's avatar: a built-in preset, the uploaded bytes, or the shipped GIF. */
 async function sendAvatar(store, method, res) {
-	const custom = store.readAvatar();
-	const mime = custom?.mime ?? "image/gif";
-	let body;
-	if (custom) body = custom.bytes;
-	else try {
-		body = await readFile(defaultAvatarPath());
-	} catch {
-		res.writeHead(404);
-		res.end();
+	const selection = store.avatarSelection();
+	if (selection.kind === "preset") {
+		const file = avatarPresetPath(selection.id);
+		if (file !== void 0 && await sendFile(res, method, file, "image/gif")) return;
+	}
+	const custom = selection.kind === "custom" ? store.readAvatar() : void 0;
+	if (custom !== void 0) {
+		sendImage(res, method, custom.bytes, custom.mime);
 		return;
 	}
+	if (await sendFile(res, method, defaultAvatarPath(), "image/gif")) return;
+	res.writeHead(404);
+	res.end();
+}
+/** Reads the file and answers with the image; false means the caller still has to answer. */
+async function sendFile(res, method, file, mime) {
+	let body;
+	try {
+		body = await readFile(file);
+	} catch {
+		return false;
+	}
+	sendImage(res, method, body, mime);
+	return true;
+}
+function sendImage(res, method, body, mime) {
 	res.writeHead(200, {
 		"content-type": mime,
 		"cache-control": "no-store",
@@ -2518,10 +2645,7 @@ var OrbRuntime = class {
 			openMain: isDesktopHost(),
 			catalog
 		});
-		this.broadcast({
-			type: "avatar",
-			version: Math.trunc(this.store.avatarVersion())
-		});
+		this.broadcast(avatarMessage(this.store));
 	}
 	/**
 	* Store the theme/locale preferences the ball mirrors and push them to a
@@ -2837,6 +2961,29 @@ function toolName(data) {
 	if (typeof data !== "object" || data === null) return "";
 	const name = data.name;
 	return typeof name === "string" ? name : "";
+}
+/**
+* Avatar descriptor for the ball. A preset travels as the relative asset path, so the
+* ball reads it off disk: pushing megabytes of GIF through the socket as a data URL
+* would stall every chrome publish.
+*/
+function avatarMessage(store) {
+	const version = Math.trunc(store.avatarVersion());
+	const selection = store.avatarSelection();
+	if (selection.kind === "preset") {
+		const src = avatarPresetSrc(selection.id);
+		if (src !== void 0) return {
+			type: "avatar",
+			kind: "preset",
+			src,
+			version
+		};
+	}
+	return {
+		type: "avatar",
+		kind: selection.kind === "custom" ? "custom" : "default",
+		version
+	};
 }
 function toolArguments(data) {
 	if (typeof data !== "object" || data === null) return "";

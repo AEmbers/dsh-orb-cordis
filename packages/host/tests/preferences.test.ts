@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -100,6 +100,43 @@ describe('profile preferences', () => {
     assert.equal(new ProfileStore(path).permission(), 'read-only')
     assert.equal(new ProfileStore(path).permissionFallback(), false)
     assert.equal(store.readAvatar(), undefined)
+    assert.equal(store.avatarVersion(), 0)
+  })
+
+  it('keeps one avatar per profile: a built-in pick replaces the upload and the other way round', () => {
+    const path = dir('avatar-preset')
+    const store = new ProfileStore(path)
+    assert.deepEqual(store.avatarSelection(), { kind: 'default' })
+
+    store.selectAvatarPreset('heart')
+    assert.deepEqual(store.avatarSelection(), { kind: 'preset', id: 'heart' })
+    assert.equal(store.readAvatar(), undefined)
+    assert.ok(store.avatarVersion() > 0)
+
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+    store.writeAvatar(png, 'image/png')
+    assert.deepEqual(store.avatarSelection(), { kind: 'custom', mime: 'image/png' })
+
+    store.selectAvatarPreset('point')
+    assert.equal(existsSync(join(path, 'orb-avatar')), false)
+    assert.deepEqual(new ProfileStore(path).avatarSelection(), { kind: 'preset', id: 'point' })
+
+    // A preset that this build no longer ships falls back to the shipped GIF.
+    writeFileSync(join(path, 'orb-avatar.json'), JSON.stringify({ kind: 'preset', preset: 'gone' }))
+    assert.deepEqual(new ProfileStore(path).avatarSelection(), { kind: 'default' })
+
+    // Meta written by the older shape still means "uploaded image".
+    writeFileSync(join(path, 'orb-avatar'), png)
+    writeFileSync(join(path, 'orb-avatar.json'), JSON.stringify({ mime: 'image/png' }))
+    assert.deepEqual(new ProfileStore(path).avatarSelection(), { kind: 'custom', mime: 'image/png' })
+
+    // Half-written state: the meta claims an upload the disk does not have.
+    writeFileSync(join(path, 'orb-avatar.json'), JSON.stringify({ kind: 'custom', mime: 'image/png' }))
+    rmSync(join(path, 'orb-avatar'))
+    assert.deepEqual(new ProfileStore(path).avatarSelection(), { kind: 'default' })
+
+    store.restoreAvatar()
+    assert.deepEqual(store.avatarSelection(), { kind: 'default' })
     assert.equal(store.avatarVersion(), 0)
   })
 

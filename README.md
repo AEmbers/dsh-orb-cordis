@@ -21,7 +21,7 @@ On startup the plugin spawns its own helper (a pinned, verified Electron runtime
 - The panel carries the ball's conversation history with **History** and **New**, an **Access** chip (view-only / workspace edits / full access; full by default, applying to the ball's commands and the background sessions it dispatches), and a composer that wraps around the ball. When the agent asks you a question, the question card is answered right on the ball; if the helper disconnects, an unanswered question is handed back to the main window.
 - The transcript is rendered natively in the ball: streaming thinking / text / tool calls interleaved in arrival order, collapsible tool cards with parameters and results (terminal, diff, read, search, web), Shiki dual-theme highlighting, copy buttons for user and assistant messages, and a per-turn token-usage pill.
 - Appearance follows the main window: dark / light theme and interface language (Chinese / English) mirror the official appearance and language settings, including live switching.
-- The ball avatar can be replaced with a custom GIF / PNG / WebP (2 MB cap) in main-window **Settings → Floating Ball**.
+- The ball avatar can be set to one of six built-in animated GIFs, or replaced with a custom GIF / PNG / WebP (2 MB cap), in main-window **Settings → Floating Ball**. The built-ins stay animated: the ball plays them whenever it is active, exactly like the shipped default.
 
 ## Dual-track agent architecture
 

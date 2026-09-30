@@ -27,3 +27,8 @@ export function helperMain(): string {
 export function defaultAvatarPath(): string {
   return join(helperRoot(), 'assets', 'deepseek-avatar-square.gif')
 }
+
+/** Built-in avatar GIFs. The ball loads them from disk, the settings page over the route. */
+export function presetAvatarDir(): string {
+  return join(helperRoot(), 'assets', 'avatars')
+}

@@ -5,6 +5,7 @@
 
 import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { isAvatarPresetId } from './avatar-presets.ts'
 
 const PERMISSION_FILE = 'orb-permission.json'
 const MODELS_FILE = 'orb-agent-models.json'
@@ -30,6 +31,12 @@ export interface AgentModels {
 }
 
 export type AvatarMime = 'image/gif' | 'image/png' | 'image/webp'
+
+/** What the ball shows: the shipped GIF, an uploaded image, or a built-in preset. */
+export type AvatarSelection =
+  | { kind: 'default' }
+  | { kind: 'custom'; mime: AvatarMime }
+  | { kind: 'preset'; id: string }
 
 const DEFAULT_MODEL: AgentModelSelection = {
   provider: 'deepseek-official',
@@ -159,12 +166,28 @@ export class ProfileStore {
     writeJson(join(this.dir, BALL_FILE), { enabled })
   }
 
+  /** Bumped by every avatar change: the ball refetches on it, the settings preview re-renders on it. */
   avatarVersion(): number {
-    try {
-      return statSync(join(this.dir, AVATAR_FILE)).mtimeMs
-    } catch {
-      return 0
+    for (const name of [AVATAR_META_FILE, AVATAR_FILE]) {
+      try {
+        return statSync(join(this.dir, name)).mtimeMs
+      } catch {
+        // Try the next file; no avatar at all means version 0.
+      }
     }
+    return 0
+  }
+
+  /**
+   * Avatar the profile currently shows, checked against what is on disk.
+   * An unknown preset id or a half-written upload falls back to the shipped GIF.
+   */
+  avatarSelection(): AvatarSelection {
+    const preset = record(readJson(join(this.dir, AVATAR_META_FILE)))?.preset
+    if (isAvatarPresetId(preset)) return { kind: 'preset', id: preset }
+    const custom = this.readAvatar()
+    if (custom !== undefined) return { kind: 'custom', mime: custom.mime }
+    return { kind: 'default' }
   }
 
   readAvatar(): { bytes: Buffer; mime: AvatarMime } | undefined {
@@ -181,18 +204,20 @@ export class ProfileStore {
     return { bytes, mime: declared ?? sniffed }
   }
 
+  /** One avatar per profile: an uploaded image drops the preset pick and the other way round. */
   writeAvatar(bytes: Uint8Array, mime: AvatarMime): void {
     writeBytes(join(this.dir, AVATAR_FILE), bytes)
-    writeJson(join(this.dir, AVATAR_META_FILE), { mime })
+    writeJson(join(this.dir, AVATAR_META_FILE), { kind: 'custom', mime })
+  }
+
+  selectAvatarPreset(id: string): void {
+    writeJson(join(this.dir, AVATAR_META_FILE), { kind: 'preset', preset: id })
+    removeIfPresent(join(this.dir, AVATAR_FILE))
   }
 
   restoreAvatar(): void {
     for (const name of [AVATAR_FILE, AVATAR_META_FILE]) {
-      try {
-        unlinkSync(join(this.dir, name))
-      } catch (error) {
-        if (!isEnoent(error)) throw error
-      }
+      removeIfPresent(join(this.dir, name))
     }
   }
 
@@ -322,6 +347,14 @@ function writeBytes(file: string, bytes: Uint8Array): void {
   const tmp = `${file}.${process.pid}.tmp`
   writeFileSync(tmp, bytes)
   renameSync(tmp, file)
+}
+
+function removeIfPresent(file: string): void {
+  try {
+    unlinkSync(file)
+  } catch (error) {
+    if (!isEnoent(error)) throw error
+  }
 }
 
 function isEnoent(error: unknown): boolean {

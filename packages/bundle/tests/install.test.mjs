@@ -56,6 +56,8 @@ function checkInstalled(profile, root) {
     'dist/helper/selection-preload.cjs',
     'dist/helper/assets/floating.html',
     'dist/helper/assets/deepseek-avatar-square.gif',
+    // Every built-in avatar the host can offer has to be in the installed tree.
+    ...readdirSync(join(repo, 'packages/helper/assets/avatars')).map((file) => `dist/helper/assets/avatars/${file}`),
     'dist/native-selection/src/index.js',
     'dist/native-selection/prebuilds/darwin-universal/libmacos-selection.dylib',
     'dist/computer-use/macos-sck-capture',

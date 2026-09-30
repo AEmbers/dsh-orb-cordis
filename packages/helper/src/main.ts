@@ -6,6 +6,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, scre
 import { request as httpRequest } from 'node:http'
 import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
+import { readAvatarChoice, type AvatarChoice } from './avatar.ts'
 import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate } from './menu.ts'
 import { attachOverlays, denyWindowPermissions } from './overlays.ts'
@@ -361,8 +362,7 @@ function deliver(message: unknown): void {
     return
   }
   if (record.type === 'avatar') {
-    const version = (record as { version?: unknown }).version
-    void loadAvatar(typeof version === 'number' ? version : 0)
+    void loadAvatar(readAvatarChoice(record as Record<string, unknown>))
     return
   }
   if (record.type === 'tcc') {
@@ -527,14 +527,19 @@ async function confirmMillifraction(window: BrowserWindow, enabled: boolean): Pr
   write({ type: 'set-millifraction', enabled })
 }
 
-async function loadAvatar(version: number): Promise<void> {
+async function loadAvatar(choice: AvatarChoice): Promise<void> {
   const tokenId = ++avatarToken
   if (!win) return
-  if (!version) {
+  if (choice.kind === 'preset') {
+    // A shipped GIF: the page loads the file itself, no socket payload involved.
+    win.webContents.send('orb:avatar', choice.src)
+    return
+  }
+  if (choice.kind === 'default') {
     win.webContents.send('orb:avatar', '')
     return
   }
-  const image = await fetchAvatar(version)
+  const image = await fetchAvatar(choice.version)
   if (tokenId !== avatarToken || !win || !image) return
   win.webContents.send('orb:avatar', `data:${image.mime};base64,${image.body.toString('base64')}`)
 }

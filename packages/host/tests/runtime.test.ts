@@ -473,6 +473,30 @@ describe('ball control socket', { concurrency: 1 }, () => {
     }
   })
 
+  it('tells the ball which avatar to load, on connect and after a pick', async () => {
+    const harness = boot()
+    try {
+      const shipped = await connect(harness.runtime)
+      assert.deepEqual(shipped.messages.find((message) => message.type === 'avatar'), {
+        type: 'avatar',
+        kind: 'default',
+        version: 0,
+      })
+      shipped.socket.destroy()
+
+      harness.store.selectAvatarPreset('cheer')
+      const picked = await connect(harness.runtime)
+      const message = picked.messages.find((entry) => entry.type === 'avatar') as { kind: string; src: string; version: number }
+      assert.equal(message.kind, 'preset')
+      // The ball resolves this against its own document, so no bytes cross the socket.
+      assert.equal(message.src, 'avatars/cheer.gif')
+      assert.ok(message.version > 0)
+      picked.socket.destroy()
+    } finally {
+      harness.runtime.halt()
+    }
+  })
+
   it('returns a pending question to the main window when the ball disconnects', async () => {
     const harness = boot()
     const client = await connect(harness.runtime)

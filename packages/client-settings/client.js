@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 
     const zh = {
       nav: '悬浮球',
-      intro: '更改写入当前配置。头像支持 GIF、PNG 或 WebP，不超过 2 MB。',
+      intro: '更改写入当前配置。',
       linux: '悬浮球在 Linux 上不可用。',
       error: '无法加载悬浮球设置。',
       saveError: '无法保存。',
@@ -19,8 +19,17 @@ window.__ModuleLoader__.load({
       ball: '启用悬浮球',
       ballDescription: '关闭后插件仍在，Computer Use 仍可在主窗口使用。',
       avatarTitle: '悬浮球头像',
-      avatarDescription: '选择一张 GIF、PNG 或 WebP 图片。恢复默认会重新使用自带头像。',
+      avatarDescription: '点一张内置动图，或选择自己的图片。上传支持 GIF、PNG、WebP，2 MB 以内。',
       avatarAlt: '悬浮球头像预览',
+      avatarBuiltin: '内置动图',
+      avatarPresetNames: {
+        point: '指点',
+        rice: '干饭',
+        heart: '比心',
+        cheer: '欢呼',
+        cheeks: '托腮',
+        smile: '微笑',
+      },
       chooseImage: '选择图片',
       restoreDefault: '恢复默认',
       tooLarge: '图片超过 2 MB。',
@@ -53,7 +62,7 @@ window.__ModuleLoader__.load({
     }
     const en = {
       nav: 'Floating ball',
-      intro: 'Changes are saved in the current profile. The avatar accepts GIF, PNG, or WebP up to 2 MB.',
+      intro: 'Changes are saved in the current profile.',
       linux: 'The floating ball is not available on Linux.',
       error: 'Could not load floating-ball settings.',
       saveError: 'Could not save.',
@@ -64,8 +73,17 @@ window.__ModuleLoader__.load({
       ball: 'Enable the floating ball',
       ballDescription: 'Turning this off keeps the plugin loaded. Computer Use stays available in the main window.',
       avatarTitle: 'Ball image',
-      avatarDescription: 'Choose a GIF, PNG, or WebP image. Restore default reuses the shipped avatar.',
+      avatarDescription: 'Pick a built-in animation, or choose your own image. Uploads accept GIF, PNG, and WebP up to 2 MB.',
       avatarAlt: 'Floating-ball image preview',
+      avatarBuiltin: 'Built-in animations',
+      avatarPresetNames: {
+        point: 'Point',
+        rice: 'Rice',
+        heart: 'Heart',
+        cheer: 'Cheer',
+        cheeks: 'Cheeks',
+        smile: 'Smile',
+      },
       chooseImage: 'Choose image',
       restoreDefault: 'Restore default',
       tooLarge: 'The image is larger than 2 MB.',
@@ -338,7 +356,8 @@ window.__ModuleLoader__.load({
                   disabled,
                   onClick: () => { void mutate('/.dsh-orb/avatar/restore', {}) },
                 }, text.restoreDefault))),
-            avatarMessage ? h('p', { className: 'dsh-orb-set-error', role: 'alert' }, avatarMessage) : null),
+            avatarMessage ? h('p', { className: 'dsh-orb-set-error', role: 'alert' }, avatarMessage) : null,
+            presetGallery(text, snap, disabled, mutate)),
           card(text.overlayTitle, text.overlayDescription, h(ModelPicker, {
             label: text.overlayTitle,
             catalog: state.catalog,
@@ -382,6 +401,31 @@ window.__ModuleLoader__.load({
         control)
     }
 
+    /** The shipped GIFs as clickable animated thumbnails; the host owns the list, this page the names. */
+    function presetGallery(text, snap, disabled, mutate) {
+      const presets = Array.isArray(snap.avatarPresets) ? snap.avatarPresets : []
+      if (presets.length === 0) return null
+      const names = text.avatarPresetNames || {}
+      return h('div', { className: 'dsh-orb-set-presets' },
+        h('p', { className: 'dsh-orb-set-presets-title', id: 'dsh-orb-presets-label' }, text.avatarBuiltin),
+        h('div', { className: 'dsh-orb-set-presets-row', role: 'group', 'aria-labelledby': 'dsh-orb-presets-label' },
+          ...presets.map((preset) => {
+            const name = names[preset.id] || preset.id
+            const selected = snap.avatarPresetId === preset.id
+            return h('button', {
+              key: preset.id,
+              type: 'button',
+              className: `dsh-orb-set-preset${selected ? ' is-selected' : ''}`,
+              'aria-pressed': selected ? 'true' : 'false',
+              title: name,
+              disabled,
+              onClick: () => { void mutate('/.dsh-orb/avatar/preset', { preset: preset.id }) },
+            },
+              h('img', { src: preset.url, alt: '', draggable: false }),
+              h('span', null, name))
+          })))
+    }
+
     function tccCard(text, snap, disabled, mutate) {
       const name = snap.tcc.appName || ''
       return h('section', { className: 'dsh-orb-set-card' },
@@ -417,6 +461,14 @@ window.__ModuleLoader__.load({
 .dsh-orb-set-row, .dsh-orb-set-avatar-row, .dsh-orb-set-tcc { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
 .dsh-orb-set h3, .dsh-orb-set h4 { margin: 0; font-size: 14px; }
 .dsh-orb-set-avatar { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; background: color-mix(in srgb, currentColor 8%, transparent); }
+.dsh-orb-set-presets { margin-top: 10px; }
+.dsh-orb-set-presets-title { margin: 0; font-size: 12px; }
+.dsh-orb-set-presets-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.dsh-orb-set-preset { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 72px; padding: 5px 2px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.dsh-orb-set-preset img { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; background: color-mix(in srgb, currentColor 8%, transparent); }
+.dsh-orb-set-preset span { font-size: 11px; line-height: 1.2; }
+.dsh-orb-set-preset:hover { border-color: color-mix(in srgb, currentColor 20%, transparent); }
+.dsh-orb-set-preset.is-selected { border-color: var(--dsw-alias-button-info-fill, #2f6fed); }
 .dsh-orb-set-actions, .dsh-orb-set-pickers { display: flex; gap: 8px; align-items: center; }
 .dsh-orb-set-button, .dsh-orb-set select { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); background: transparent; color: inherit; border-radius: 8px; padding: 6px 10px; font: inherit; }
 .dsh-orb-set-ghost { border-color: transparent; }

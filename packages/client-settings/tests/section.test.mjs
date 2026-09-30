@@ -1,12 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createContext, runInContext } from 'node:vm'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '../../..')
+
+// The host owns the preset ids, the page owns their names. Read the real list so a
+// preset added on the host side without copy here fails a test instead of shipping.
+const { AVATAR_PRESETS } = await import(pathToFileURL(join(root, 'packages/host/src/avatar-presets.ts')).href)
 
 function loadSection() {
   const calls = []
@@ -16,6 +20,8 @@ function loadSection() {
     supported: true,
     ballEnabled: true,
     avatarUrl: '/.dsh-orb/avatar?v=0',
+    avatarPresetId: null,
+    avatarPresets: AVATAR_PRESETS.map((preset) => ({ id: preset.id, url: `/.dsh-orb/avatar/preset/${preset.id}` })),
     overlay: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     selectionEnabled: false,
@@ -91,6 +97,7 @@ function loadSection() {
       if (options.method === 'POST' && path === '/.dsh-orb/ball') snapshot.ballEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/millifraction') snapshot.millifractionEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/overlay-model') snapshot.overlay = JSON.parse(options.body)
+      if (options.method === 'POST' && path === '/.dsh-orb/avatar/preset') snapshot.avatarPresetId = JSON.parse(options.body).preset
       if (options.method === 'POST') return json(snapshot)
       return { ok: false, status: 404, async text() { return JSON.stringify({ error: 'missing' }) } }
     },
@@ -201,6 +208,31 @@ describe('settings section', () => {
     view = page.render()
     assert.equal(find(view, (node) => node.children?.includes('图片超过 2 MB。')).length, 1)
     assert.equal(page.calls.some((call) => call.path === '/.dsh-orb/avatar'), false)
+
+    // Built-in GIFs: one animated thumbnail per shipped preset, named, and pickable.
+    const gallery = find(view, (node) => node.props?.className === 'dsh-orb-set-presets-row')[0]
+    assert.ok(gallery)
+    const thumbs = gallery.children
+    assert.equal(thumbs.length, AVATAR_PRESETS.length)
+    for (const [index, preset] of AVATAR_PRESETS.entries()) {
+      const button = thumbs[index]
+      const image = find(button, (node) => node.type === 'img')[0]
+      assert.equal(image.props.src, `/.dsh-orb/avatar/preset/${preset.id}`)
+      const name = button.children.find((child) => child.type === 'span')
+      assert.ok(name.children[0].length > 0, `${preset.id} has copy`)
+      assert.equal(name.children[0] === preset.id, false, `${preset.id} has a real label, not the raw id`)
+      assert.equal(button.props['aria-pressed'], 'false')
+    }
+    thumbs[1].props.onClick()
+    await settle()
+    const pick = page.calls.find((call) => call.path === '/.dsh-orb/avatar/preset')
+    assert.equal(JSON.parse(pick.options.body).preset, AVATAR_PRESETS[1].id)
+
+    // The snapshot the host echoes back is what marks the pick.
+    view = page.render()
+    const selected = find(view, (node) => node.props?.className === 'dsh-orb-set-preset is-selected')
+    assert.equal(selected.length, 1)
+    assert.equal(selected[0].props['aria-pressed'], 'true')
 
     page.setMode('linux')
     page.reset()

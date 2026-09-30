@@ -10,6 +10,7 @@ import { dirname, resolve } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { Appearance, ThemePreference } from './appearance.ts'
+import { avatarPresetSrc } from './avatar-presets.ts'
 import { normalizeCatalog } from './catalog.ts'
 import { resolveElectronBinary } from './electron-runtime.ts'
 import { helperMain } from './helper-path.ts'
@@ -1206,7 +1207,7 @@ export class OrbRuntime {
       openMain: isDesktopHost(),
       catalog,
     })
-    this.broadcast({ type: 'avatar', version: Math.trunc(this.store.avatarVersion()) })
+    this.broadcast(avatarMessage(this.store))
   }
 
   /**
@@ -1527,6 +1528,21 @@ function toolName(data: unknown): string {
   if (typeof data !== 'object' || data === null) return ''
   const name = (data as { name?: unknown }).name
   return typeof name === 'string' ? name : ''
+}
+
+/**
+ * Avatar descriptor for the ball. A preset travels as the relative asset path, so the
+ * ball reads it off disk: pushing megabytes of GIF through the socket as a data URL
+ * would stall every chrome publish.
+ */
+function avatarMessage(store: ProfileStore): Record<string, unknown> {
+  const version = Math.trunc(store.avatarVersion())
+  const selection = store.avatarSelection()
+  if (selection.kind === 'preset') {
+    const src = avatarPresetSrc(selection.id)
+    if (src !== undefined) return { type: 'avatar', kind: 'preset', src, version }
+  }
+  return { type: 'avatar', kind: selection.kind === 'custom' ? 'custom' : 'default', version }
 }
 
 function toolArguments(data: unknown): string {

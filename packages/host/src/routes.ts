@@ -7,6 +7,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { AVATAR_PRESETS, avatarPresetPath, isAvatarPresetId } from './avatar-presets.ts'
 import { normalizeCatalog, type ModelCatalog } from './catalog.ts'
 import {
   isAgentModelSelection,
@@ -100,6 +101,15 @@ async function handle(deps: RouteDeps, req: IncomingMessage, res: ServerResponse
     await sendAvatar(deps.store, method, res)
     return
   }
+  if ((method === 'GET' || method === 'HEAD') && path.startsWith(`${PREFIX}/avatar/preset/`)) {
+    const id = decodeURIComponent(path.slice(`${PREFIX}/avatar/preset/`.length))
+    const file = avatarPresetPath(id)
+    if (file === undefined || !await sendFile(res, method, file, 'image/gif')) {
+      res.writeHead(404)
+      res.end()
+    }
+    return
+  }
   if (!orbSupported()) {
     sendJson(res, 403, { error: 'unsupported' })
     return
@@ -173,6 +183,17 @@ async function handle(deps: RouteDeps, req: IncomingMessage, res: ServerResponse
     sendJson(res, 200, await snapshot(deps))
     return
   }
+  if (method === 'POST' && path === `${PREFIX}/avatar/preset`) {
+    const preset = asRecord(await readJson(req))?.preset
+    if (!isAvatarPresetId(preset)) {
+      sendJson(res, 400, { error: 'invalid-preset' })
+      return
+    }
+    deps.store.selectAvatarPreset(preset)
+    await deps.control.publishChrome()
+    sendJson(res, 200, await snapshot(deps))
+    return
+  }
   if (method === 'POST' && path === `${PREFIX}/avatar/restore`) {
     deps.store.restoreAvatar()
     await deps.control.publishChrome()
@@ -197,6 +218,8 @@ async function snapshot(deps: RouteDeps): Promise<{
   supported: boolean
   ballEnabled: boolean
   avatarUrl: string
+  avatarPresetId: string | null
+  avatarPresets: { id: string; url: string }[]
   overlay: AgentModelSelection
   background: AgentModelSelection
   selectionEnabled: boolean
@@ -208,10 +231,15 @@ async function snapshot(deps: RouteDeps): Promise<{
 }> {
   const models = deps.store.models()
   const version = Math.trunc(deps.store.avatarVersion())
+  const selection = deps.store.avatarSelection()
   return {
     supported: orbSupported(),
     ballEnabled: deps.store.ballEnabled(),
     avatarUrl: `${PREFIX}/avatar?v=${version}`,
+    avatarPresetId: selection.kind === 'preset' ? selection.id : null,
+    // No version on the gallery URLs: the files are the same on every render, and a
+    // bump would make the page refetch every multi-megabyte GIF on any avatar change.
+    avatarPresets: AVATAR_PRESETS.map((preset) => ({ id: preset.id, url: `${PREFIX}/avatar/preset/${preset.id}` })),
     overlay: models.overlay,
     background: models.background,
     selectionEnabled: deps.store.selectionEnabled(),
@@ -232,20 +260,36 @@ async function catalog(deps: RouteDeps): Promise<ModelCatalog> {
   }
 }
 
+/** The profile's avatar: a built-in preset, the uploaded bytes, or the shipped GIF. */
 async function sendAvatar(store: ProfileStore, method: string, res: ServerResponse): Promise<void> {
-  const custom = store.readAvatar()
-  const mime = custom?.mime ?? 'image/gif'
-  let body: Buffer
-  if (custom) body = custom.bytes
-  else {
-    try {
-      body = await readFile(defaultAvatarPath())
-    } catch {
-      res.writeHead(404)
-      res.end()
-      return
-    }
+  const selection = store.avatarSelection()
+  if (selection.kind === 'preset') {
+    const file = avatarPresetPath(selection.id)
+    if (file !== undefined && await sendFile(res, method, file, 'image/gif')) return
   }
+  const custom = selection.kind === 'custom' ? store.readAvatar() : undefined
+  if (custom !== undefined) {
+    sendImage(res, method, custom.bytes, custom.mime)
+    return
+  }
+  if (await sendFile(res, method, defaultAvatarPath(), 'image/gif')) return
+  res.writeHead(404)
+  res.end()
+}
+
+/** Reads the file and answers with the image; false means the caller still has to answer. */
+async function sendFile(res: ServerResponse, method: string, file: string, mime: string): Promise<boolean> {
+  let body: Buffer
+  try {
+    body = await readFile(file)
+  } catch {
+    return false
+  }
+  sendImage(res, method, body, mime)
+  return true
+}
+
+function sendImage(res: ServerResponse, method: string, body: Buffer, mime: string): void {
   res.writeHead(200, {
     'content-type': mime,
     'cache-control': 'no-store',

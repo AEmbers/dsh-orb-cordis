@@ -194,6 +194,47 @@ describe('settings routes', () => {
     assert.equal(JSON.parse(restored.body.toString('utf8')).avatarUrl, '/.dsh-orb/avatar?v=0')
     assert.equal(calls.includes('chrome'), true)
 
+    // Built-in avatars: the page lists them, reads their bytes, and picks one.
+    const gallery = JSON.parse(settings.body.toString('utf8')) as {
+      avatarPresetId: string | null
+      avatarPresets: { id: string; url: string }[]
+    }
+    assert.equal(gallery.avatarPresetId, null)
+    assert.equal(gallery.avatarPresets.length > 0, true)
+    const [first] = gallery.avatarPresets
+    assert.equal(first.url, `/.dsh-orb/avatar/preset/${first.id}`)
+
+    const presetBytes = response()
+    await handler(request('GET', first.url, undefined, { 'x-dsh-user': 'ok' }), presetBytes)
+    assert.equal(presetBytes.status, 200)
+    assert.equal(presetBytes.body.subarray(0, 6).toString('ascii'), 'GIF89a')
+    assert.equal(presetBytes.body.length > 100_000, true)
+
+    const anonymousPreset = response()
+    await handler(request('GET', first.url), anonymousPreset)
+    assert.equal(anonymousPreset.status, 401)
+
+    const unknownPreset = response()
+    await handler(request('GET', `/.dsh-orb/avatar/preset/${first.id}%2F..%2Frestore`, undefined, { 'x-dsh-user': 'ok' }), unknownPreset)
+    assert.equal(unknownPreset.status, 404)
+
+    const picked = response()
+    await handler(request('POST', '/.dsh-orb/avatar/preset', JSON.stringify({ preset: first.id }), { 'x-dsh-user': 'ok' }), picked)
+    const pickedSnapshot = JSON.parse(picked.body.toString('utf8')) as { avatarUrl: string; avatarPresetId: string | null }
+    assert.equal(pickedSnapshot.avatarPresetId, first.id)
+    assert.match(pickedSnapshot.avatarUrl, /^\/\.dsh-orb\/avatar\?v=[1-9]/)
+    assert.equal(calls.includes('chrome'), true)
+
+    // The ball's own route (and the settings preview) then serves the same bytes.
+    const currentPreset = response()
+    await handler(request('GET', pickedSnapshot.avatarUrl, undefined, { 'x-dsh-orb-helper': 'helper-secret' }), currentPreset)
+    assert.equal(currentPreset.body.equals(presetBytes.body), true)
+
+    const wrongPreset = response()
+    await handler(request('POST', '/.dsh-orb/avatar/preset', JSON.stringify({ preset: 'gone' }), { 'x-dsh-user': 'ok' }), wrongPreset)
+    assert.equal(wrongPreset.status, 400)
+    assert.equal(JSON.parse(wrongPreset.body.toString('utf8')).error, 'invalid-preset')
+
     const missing = response()
     await handler(request('GET', '/.dsh-orb/nope', undefined, { 'x-dsh-user': 'ok' }), missing)
     assert.equal(missing.status, 404)
