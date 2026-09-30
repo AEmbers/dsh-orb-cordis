@@ -1202,7 +1202,6 @@ export class OrbRuntime {
       type: 'chrome',
       overlay: models.overlay,
       background: models.background,
-      selectionEnabled: this.store.selectionEnabled(),
       millifractionEnabled: this.store.millifractionEnabled(),
       openMain: isDesktopHost(),
       catalog,

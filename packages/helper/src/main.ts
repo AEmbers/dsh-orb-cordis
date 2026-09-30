@@ -26,7 +26,6 @@ interface Appearance {
 interface ChromeState {
   overlay: MenuSelection
   background: MenuSelection
-  selectionEnabled: boolean
   millifractionEnabled: boolean
   openMain: boolean
   catalog: MenuCatalog
@@ -41,7 +40,6 @@ const defaultSelection: MenuSelection = {
 let chrome: ChromeState = {
   overlay: defaultSelection,
   background: defaultSelection,
-  selectionEnabled: false,
   millifractionEnabled: false,
   openMain: false,
   catalog: { groups: [] },
@@ -482,7 +480,6 @@ function readChrome(value: unknown): ChromeState {
   const record = value as {
     overlay?: MenuSelection
     background?: MenuSelection
-    selectionEnabled?: unknown
     millifractionEnabled?: unknown
     openMain?: unknown
     catalog?: MenuCatalog
@@ -490,7 +487,6 @@ function readChrome(value: unknown): ChromeState {
   return {
     overlay: selectionOr(record.overlay, chrome.overlay),
     background: selectionOr(record.background, chrome.background),
-    selectionEnabled: record.selectionEnabled === true,
     millifractionEnabled: record.millifractionEnabled === true,
     openMain: record.openMain === true,
     catalog: record.catalog ?? { groups: [] },
@@ -507,7 +503,6 @@ async function showMenu(window: BrowserWindow): Promise<void> {
     openMain: () => { write({ type: 'open-main' }) },
     setOverlay: (selection) => { write({ type: 'set-overlay', selection }) },
     setBackground: (selection) => { write({ type: 'set-background', selection }) },
-    setSelection: (enabled) => { write({ type: 'set-selection', enabled }) },
     setMillifraction: (enabled) => { void confirmMillifraction(window, enabled) },
     disable: () => { write({ type: 'disable' }) },
   })

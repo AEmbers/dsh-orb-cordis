@@ -18,7 +18,7 @@ function loadSection() {
     avatarUrl: '/.dsh-orb/avatar?v=0',
     overlay: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
-    selectionEnabled: true,
+    selectionEnabled: false,
     millifractionEnabled: false,
     tcc: { applicable: true, appName: 'DeepSeek Harness', screen: 'missing', accessibility: 'granted' },
   }
@@ -220,7 +220,9 @@ describe('settings section', () => {
     assert.match(patch, /id: ui-settings-orb/)
     assert.match(patch, /id: ui-settings-orb\n\s+name: dsh-orb\n/)
     const client = readFileSync(join(here, '../client.js'), 'utf8')
-    assert.match(client, /在其他应用里选中文字会出现搜索、翻译和发给 Agent/)
+    // The selection toolbar is disabled (buggy): no settings entry point may ship.
+    assert.equal(client.includes('划词'), false)
+    assert.equal(client.includes('selectionToggle'), false)
     assert.equal(client.includes('authenticatedUrl'), false)
   })
 

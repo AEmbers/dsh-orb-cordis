@@ -14,7 +14,6 @@ window.__ModuleLoader__.load({
       saveError: '无法保存。',
       helperFailed: '悬浮球多次退出，已经停止重试。关闭后再打开可再试一次。',
       runtimeFailed: '悬浮球运行时没有下载成功。关闭后再打开可再试一次。',
-      selectionUnavailable: '划词不可用。',
       permissionFallback: '权限设置无法读取，已改为工作区内修改。',
       retry: '重试',
       ball: '启用悬浮球',
@@ -32,9 +31,6 @@ window.__ModuleLoader__.load({
       backgroundDescription: '新建后台 code_agent 会话使用的模型与思考强度。',
       emptyCatalog: '暂无可用模型。',
       defaultEffort: '默认',
-      selectionTitle: '划词工具栏',
-      selectionDescription: '打开后，在其他应用里选中文字会出现搜索、翻译和发给 Agent。',
-      selectionToggle: '启用划词工具栏',
       millifractionTitle: '千分比坐标',
       millifractionDescription: '新建对话使用截图的 0–1000 比例。关闭后使用已附加图片的像素。更改此项会新建对话。',
       millifractionToggle: '使用千分比坐标',
@@ -63,7 +59,6 @@ window.__ModuleLoader__.load({
       saveError: 'Could not save.',
       helperFailed: 'The floating ball exited too many times and stopped retrying. Turn it off and on to try again.',
       runtimeFailed: 'The floating-ball runtime did not download. Turn it off and on to try again.',
-      selectionUnavailable: 'Selection is unavailable.',
       permissionFallback: 'The permission file could not be read. Access is now Workspace Write.',
       retry: 'Retry',
       ball: 'Enable the floating ball',
@@ -81,9 +76,6 @@ window.__ModuleLoader__.load({
       backgroundDescription: 'Model and reasoning effort for new background code_agent sessions.',
       emptyCatalog: 'No models available.',
       defaultEffort: 'Default',
-      selectionTitle: 'Selection toolbar',
-      selectionDescription: 'When on, selecting text in another app shows Search, Translate, and Send to Agent.',
-      selectionToggle: 'Enable the selection toolbar',
       millifractionTitle: 'Millifraction coordinates',
       millifractionDescription: 'New chats use 0–1000 fractions of the screenshot. Turn off to use pixels of the attached image. Changing this creates a new conversation.',
       millifractionToggle: 'Use millifraction coordinates',
@@ -307,9 +299,6 @@ window.__ModuleLoader__.load({
         snap.permissionFallback === true
           ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.permissionFallback)
           : null,
-        snap.supported && snap.selectionAvailable === false
-          ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.selectionUnavailable)
-          : null,
         h('fieldset', { className: 'dsh-orb-set-fields', disabled },
           card(text.ball, text.ballDescription, h(Toggle, {
             checked: snap.ballEnabled === true,
@@ -363,12 +352,6 @@ window.__ModuleLoader__.load({
             current: snap.background,
             disabled,
             onSelect: (selection) => { void mutate('/.dsh-orb/background-model', selection) },
-          })),
-          card(text.selectionTitle, text.selectionDescription, h(Toggle, {
-            checked: snap.selectionEnabled === true,
-            label: text.selectionToggle,
-            disabled,
-            onChange: (enabled) => { void mutate('/.dsh-orb/selection', { enabled }) },
           })),
           card(text.millifractionTitle, text.millifractionDescription, h(Toggle, {
             checked: snap.millifractionEnabled === true,

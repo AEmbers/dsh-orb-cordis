@@ -340,10 +340,10 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.equal(harness.store.models().overlay.model, 'deepseek-pro')
 
       const creates = harness.calls.create.length
-      client.send({ type: 'set-selection', enabled: false })
-      await waitFor(() => harness.store.selectionEnabled() === false)
+      client.send({ type: 'set-selection', enabled: true })
+      await waitFor(() => harness.store.selectionEnabled() === true)
       const selection = JSON.parse(readFileSync(join(harness.profile, 'selection-toolbar.json'), 'utf8')) as { enabled: boolean }
-      assert.equal(selection.enabled, false)
+      assert.equal(selection.enabled, true)
       await new Promise((resolve) => setTimeout(resolve, 30))
       assert.equal(harness.calls.create.length, creates)
 
@@ -364,13 +364,11 @@ describe('ball control socket', { concurrency: 1 }, () => {
       const chrome = client.messages.filter((message) => message.type === 'chrome').at(-1) as {
         overlay: { model: string }
         background: { model: string }
-        selectionEnabled: boolean
         millifractionEnabled: boolean
         catalog: { groups: { id: string }[] }
       }
       assert.equal(chrome.overlay.model, 'deepseek-pro')
       assert.equal(chrome.background.model, 'background-model')
-      assert.equal(chrome.selectionEnabled, false)
       assert.equal(chrome.millifractionEnabled, true)
       assert.equal(chrome.catalog.groups[0]?.id, 'deepseek-official')
     } finally {

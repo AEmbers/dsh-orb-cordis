@@ -411,7 +411,7 @@ function effortItems(provider, model, current, onSelect, defaultEffortLabel) {
 //#endregion
 //#region src/menu.ts
 /** Right-click menu for the ball. Model rows come from the host catalog. */
-/** Labels and actions for the ball menu. The selection checkbox writes the preference; the host starts and stops the monitor. */
+/** Labels and actions for the ball menu. The selection toolbar is disabled (buggy) and has no entry here. */
 function contextMenuTemplate(state, zh, actions) {
 	const labels = {
 		empty: zh ? "没有可用的模型。" : "No models available.",
@@ -432,14 +432,6 @@ function contextMenuTemplate(state, zh, actions) {
 		{
 			label: zh ? "后台 Agent 模型" : "Background Agent model",
 			submenu: modelMenuItems(state.catalog, state.background, actions.setBackground, labels)
-		},
-		{
-			label: zh ? "划词工具栏" : "Selection toolbar",
-			type: "checkbox",
-			checked: state.selectionEnabled,
-			click: (item) => {
-				actions.setSelection(item.checked);
-			}
 		},
 		{
 			label: zh ? "千分比坐标" : "Millifraction coordinates",
@@ -948,7 +940,6 @@ const defaultSelection = {
 let chrome = {
 	overlay: defaultSelection,
 	background: defaultSelection,
-	selectionEnabled: false,
 	millifractionEnabled: false,
 	openMain: false,
 	catalog: { groups: [] }
@@ -1383,7 +1374,6 @@ function readChrome(value) {
 	return {
 		overlay: selectionOr(record.overlay, chrome.overlay),
 		background: selectionOr(record.background, chrome.background),
-		selectionEnabled: record.selectionEnabled === true,
 		millifractionEnabled: record.millifractionEnabled === true,
 		openMain: record.openMain === true,
 		catalog: record.catalog ?? { groups: [] }
@@ -1408,12 +1398,6 @@ async function showMenu(window) {
 			write({
 				type: "set-background",
 				selection
-			});
-		},
-		setSelection: (enabled) => {
-			write({
-				type: "set-selection",
-				enabled
 			});
 		},
 		setMillifraction: (enabled) => {

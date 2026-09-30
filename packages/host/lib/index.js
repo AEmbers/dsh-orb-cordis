@@ -326,11 +326,9 @@ function readMillifraction(dir) {
 	return typeof enabled === "boolean" ? enabled : defaultMillifraction();
 }
 function readSelection(dir) {
-	const value = record(readJson$1(join(dir, SELECTION_FILE)));
-	const language = value?.translateTargetLanguage === "en" ? "en" : "zh";
 	return {
-		enabled: typeof value?.enabled === "boolean" ? value.enabled : true,
-		language
+		enabled: false,
+		language: record(readJson$1(join(dir, SELECTION_FILE)))?.translateTargetLanguage === "en" ? "en" : "zh"
 	};
 }
 function readBall(dir) {
@@ -2516,7 +2514,6 @@ var OrbRuntime = class {
 			type: "chrome",
 			overlay: models.overlay,
 			background: models.background,
-			selectionEnabled: this.store.selectionEnabled(),
 			millifractionEnabled: this.store.millifractionEnabled(),
 			openMain: isDesktopHost(),
 			catalog

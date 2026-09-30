@@ -111,20 +111,18 @@ describe('ball menu', () => {
     }), [{ label: '没有可用的模型。', enabled: false }])
   })
 
-  it('lists open, both models, the selection switch, coordinates, and disable', () => {
+  it('lists open, both models, coordinates, and disable', () => {
     const actions: string[] = []
     const template = contextMenuTemplate({
       catalog,
       overlay: { provider: 'deepseek-official', model: 'plain' },
       background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
-      selectionEnabled: true,
       millifractionEnabled: false,
       openMain: true,
     }, true, {
       openMain: () => { actions.push('open') },
       setOverlay: () => { actions.push('overlay') },
       setBackground: () => { actions.push('background') },
-      setSelection: (enabled) => { actions.push(`selection:${enabled}`) },
       setMillifraction: (enabled) => { actions.push(`fraction:${enabled}`) },
       disable: () => { actions.push('disable') },
     })
@@ -132,32 +130,28 @@ describe('ball menu', () => {
       '打开主窗口',
       '悬浮球 Agent 模型',
       '后台 Agent 模型',
-      '划词工具栏',
       '千分比坐标',
       'separator',
       '停用悬浮球',
     ])
     assert.equal(template[0]?.enabled, true)
     template[0]?.click?.({ checked: false })
-    template[3]?.click?.({ checked: false })
-    template[4]?.click?.({ checked: true })
-    template[6]?.click?.({ checked: false })
+    template[3]?.click?.({ checked: true })
+    template[5]?.click?.({ checked: false })
     const background = template[2]?.submenu?.find((item) => item.label === '✓ Flash')
     assert.equal(background?.submenu?.find((item) => item.label === 'Max')?.checked, true)
     background?.submenu?.[0]?.click?.({ checked: true })
-    assert.deepEqual(actions, ['open', 'selection:false', 'fraction:true', 'disable', 'background'])
+    assert.deepEqual(actions, ['open', 'fraction:true', 'disable', 'background'])
     const english = contextMenuTemplate({
       catalog: { groups: [] },
       overlay: { provider: 'deepseek-official', model: 'plain' },
       background: { provider: 'deepseek-official', model: 'plain' },
-      selectionEnabled: false,
       millifractionEnabled: false,
       openMain: false,
     }, false, {
       openMain() {},
       setOverlay() {},
       setBackground() {},
-      setSelection() {},
       setMillifraction() {},
       disable() {},
     })

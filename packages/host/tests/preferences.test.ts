@@ -32,7 +32,7 @@ describe('profile preferences', () => {
     assert.deepEqual(store.models().background, store.models().overlay)
     assert.equal(store.millifractionEnabled(), defaultMillifraction())
     assert.equal(store.coordinateMode(), defaultMillifraction() ? 'millifraction' : 'pixel')
-    assert.equal(store.selectionEnabled(), true)
+    assert.equal(store.selectionEnabled(), false)
     assert.equal(store.ballEnabled(), true)
     assert.equal(store.avatarVersion(), 0)
     assert.equal(store.readAvatar(), undefined)
@@ -40,8 +40,9 @@ describe('profile preferences', () => {
 
   it('keeps the two model tracks and the selection language apart', () => {
     const path = dir('models')
+    // The selection toolbar is disabled everywhere: a stored enabled flag is ignored.
     writeFileSync(join(path, 'selection-toolbar.json'), JSON.stringify({
-      enabled: false,
+      enabled: true,
       translateTargetLanguage: 'en',
     }))
     const store = new ProfileStore(path)
