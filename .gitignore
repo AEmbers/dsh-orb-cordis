@@ -51,6 +51,8 @@ Thumbs.db
 
 # Local agent / tooling state
 .cursor/
+.zcode/
+.zcodeignore
 
 # Assembled by packages/bundle/scripts/assemble.mjs
 packages/bundle/lib/
