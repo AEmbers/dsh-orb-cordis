@@ -10,6 +10,10 @@ out/
 .turbo/
 .cache/
 
+# Compiled from packages/*/src by `pnpm build` — never hand-edited
+packages/*/lib/
+packages/helper/assets/vendor/
+
 # Package artifacts
 *.tgz
 
