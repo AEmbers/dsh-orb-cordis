@@ -34,6 +34,7 @@ import {
 import { pinSessionId } from './services.ts'
 import { selectModelKeepDefault } from './select-model.ts'
 import { createForegroundMemory } from './windows-foreground.ts'
+import { EMPTY_UPDATE_STATE, type UpdateChecker, type UpdateState } from './update.ts'
 
 /** Host services the plugin injects. Shapes match the official 0.1.7-rc.2 controllers. */
 export interface OrbContext {
@@ -214,6 +215,8 @@ export class OrbRuntime {
   private pendingStart = false
   private helperError: string | undefined
   private userData = ''
+  /** Newer version waiting to be installed, or null once none is known. */
+  private updateAvailable: string | null = null
   private idleWarned = false
   private sessionId: string | undefined
   private sessionError: string | undefined
@@ -235,6 +238,8 @@ export class OrbRuntime {
   private responseKeys: string[] = []
   private helperPid: number | undefined
   private appearance: Appearance = {}
+  /** Set by the plugin entry; the settings routes and the ball menu both drive it. */
+  private updater: UpdateChecker | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
   /** Chrome window ids each helper reported, keyed by its socket. */
   private readonly chromeWindows = new Map<Socket, readonly number[]>()
@@ -1241,9 +1246,21 @@ export class OrbRuntime {
       background: models.background,
       millifractionEnabled: this.store.millifractionEnabled(),
       openMain: isDesktopHost(),
+      update: this.updateAvailable,
       catalog,
     })
     this.broadcast(avatarMessage(this.store))
+  }
+
+  /**
+   * Remember the version the check found and tell the ball.
+   * The menu row and the status line both come from this; the settings page reads the checker.
+   */
+  setUpdateAvailable(version: string | null): void {
+    if (this.updateAvailable === version) return
+    this.updateAvailable = version
+    if (version !== null) this.broadcast({ type: 'update', state: 'available', version })
+    void this.publishChrome()
   }
 
   /**
@@ -1294,6 +1311,52 @@ export class OrbRuntime {
       return
     }
     this.halt()
+  }
+
+  /** Take the checker the plugin entry owns. Without one the settings page hides its update card. */
+  useUpdater(updater: UpdateChecker): void {
+    this.updater = updater
+    this.setUpdateAvailable(updater.availableVersion())
+  }
+
+  updateState(): UpdateState {
+    return this.updater?.state() ?? EMPTY_UPDATE_STATE
+  }
+
+  async checkUpdate(): Promise<void> {
+    await this.updater?.check(true)
+    this.setUpdateAvailable(this.updater?.availableVersion() ?? null)
+  }
+
+  /**
+   * Start the upgrade and return at once; the settings page polls {@link updateState}.
+   * The ball hears the outcome through the same status line every other action uses.
+   */
+  installUpdate(approvedBuilds?: string[]): void {
+    const updater = this.updater
+    if (updater === undefined) return
+    const version = updater.availableVersion()
+    if (version === null) return
+    this.run('update', async () => {
+      this.broadcast({ type: 'update', state: 'starting', version })
+      await updater.install(approvedBuilds)
+      const state = updater.state()
+      this.setUpdateAvailable(updater.availableVersion())
+      if (state.error !== null) {
+        this.broadcast({
+          type: 'update',
+          state: 'failed',
+          version,
+          reason: state.pendingBuilds.length > 0 ? 'build-blocked' : state.error,
+        })
+        return
+      }
+      this.broadcast({ type: 'update', state: 'done', version, restart: state.restartRequired })
+    })
+  }
+
+  setAutoCheck(enabled: boolean): void {
+    this.updater?.setAutoCheck(enabled)
   }
 
   private onControl(message: unknown, socket: Socket): void {
@@ -1356,6 +1419,10 @@ export class OrbRuntime {
     }
     if (record.type === 'disable') {
       this.run('disable', () => this.setBallEnabled(false))
+      return
+    }
+    if (record.type === 'update') {
+      this.installUpdate()
       return
     }
     if (record.type === 'open-main') {

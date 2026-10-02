@@ -19,6 +19,7 @@ import {
 import { selectionRuntimeAvailable } from '@dsh-orb/native-selection'
 import { defaultAvatarPath } from './helper-path.ts'
 import { isTccRight, type TccMonitor, type TccStatus } from './tcc.ts'
+import type { UpdateState } from './update.ts'
 
 const PREFIX = '/.dsh-orb'
 const HELPER_HEADER = 'x-dsh-orb-helper'
@@ -50,6 +51,11 @@ export interface OrbControl {
   setMillifractionEnabled(enabled: boolean): Promise<void>
   setBallEnabled(enabled: boolean): Promise<void>
   helperStatus?(): string
+  updateState(): UpdateState
+  checkUpdate(): Promise<void>
+  /** Starts the upgrade and returns at once; the page polls {@link updateState} while it runs. */
+  installUpdate(approvedBuilds?: string[]): void
+  setAutoCheck(enabled: boolean): void
 }
 
 interface RouteDeps {
@@ -95,6 +101,32 @@ async function handle(deps: RouteDeps, req: IncomingMessage, res: ServerResponse
   }
   if (method === 'GET' && path === `${PREFIX}/tcc`) {
     sendJson(res, 200, deps.tcc.status())
+    return
+  }
+  // Update management sits above the platform gate: Linux has no ball but still runs this host.
+  if (method === 'GET' && path === `${PREFIX}/update`) {
+    sendJson(res, 200, deps.control.updateState())
+    return
+  }
+  if (method === 'POST' && path === `${PREFIX}/update/check`) {
+    await deps.control.checkUpdate()
+    sendJson(res, 200, await snapshot(deps))
+    return
+  }
+  if (method === 'POST' && path === `${PREFIX}/update/install`) {
+    const builds = stringListField(await readJson(req), 'approvedBuilds')
+    deps.control.installUpdate(builds)
+    sendJson(res, 200, await snapshot(deps))
+    return
+  }
+  if (method === 'POST' && path === `${PREFIX}/update/auto`) {
+    const enabled = booleanField(await readJson(req))
+    if (enabled === undefined) {
+      sendJson(res, 400, { error: 'invalid-auto-check' })
+      return
+    }
+    deps.control.setAutoCheck(enabled)
+    sendJson(res, 200, await snapshot(deps))
     return
   }
   if ((method === 'GET' || method === 'HEAD') && path === `${PREFIX}/avatar`) {
@@ -228,6 +260,7 @@ async function snapshot(deps: RouteDeps): Promise<{
   helperError: string
   selectionAvailable: boolean
   permissionFallback: boolean
+  update: UpdateState
 }> {
   const models = deps.store.models()
   const version = Math.trunc(deps.store.avatarVersion())
@@ -248,6 +281,7 @@ async function snapshot(deps: RouteDeps): Promise<{
     helperError: deps.control.helperStatus?.() ?? '',
     selectionAvailable: selectionRuntimeAvailable(),
     permissionFallback: deps.store.permissionFallback(),
+    update: deps.control.updateState(),
   }
 }
 
@@ -330,6 +364,14 @@ function selectionFrom(value: unknown): AgentModelSelection | undefined {
 function booleanField(value: unknown): boolean | undefined {
   const enabled = asRecord(value)?.enabled
   return typeof enabled === 'boolean' ? enabled : undefined
+}
+
+/** Optional list of package names, absent when the field is missing or empty. */
+function stringListField(value: unknown, key: string): string[] | undefined {
+  const list = asRecord(value)?.[key]
+  if (!Array.isArray(list)) return undefined
+  const names = list.filter((item): item is string => typeof item === 'string' && item !== '')
+  return names.length === 0 ? undefined : names
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

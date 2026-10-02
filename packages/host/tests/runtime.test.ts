@@ -9,6 +9,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { OrbRuntime, type OrbContext } from '../src/orb.ts'
 import { ProfileStore } from '../src/preferences.ts'
 import type { TccRight, TccStatus } from '../src/tcc.ts'
+import type { UpdateChecker } from '../src/update.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'orb-runtime-'))
 process.env.DSH_HOME = home
@@ -408,11 +409,13 @@ describe('ball control socket', { concurrency: 1 }, () => {
         overlay: { model: string }
         background: { model: string }
         millifractionEnabled: boolean
+        update: string | null
         catalog: { groups: { id: string }[] }
       }
       assert.equal(chrome.overlay.model, 'deepseek-pro')
       assert.equal(chrome.background.model, 'background-model')
       assert.equal(chrome.millifractionEnabled, true)
+      assert.equal(chrome.update, null, 'no checker took over this runtime')
       assert.equal(chrome.catalog.groups[0]?.id, 'deepseek-official')
     } finally {
       client.socket.end()
@@ -420,8 +423,53 @@ describe('ball control socket', { concurrency: 1 }, () => {
     }
   })
 
-  it('cancels only the ball session, answers a question, and disables the helper', async () => {
+  it('offers the new version on the ball and upgrades when the menu asks', async () => {
     const harness = boot()
+    const client = await connect(harness.runtime)
+    const installs: unknown[] = []
+    const state = {
+      currentVersion: '0.1.0',
+      installedVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      available: true,
+      checking: false,
+      updating: false,
+      canUpdate: true,
+      autoCheck: true,
+      checkedAt: null,
+      restartRequired: false,
+      error: null,
+      pendingBuilds: [],
+    }
+    try {
+      harness.runtime.useUpdater({
+        state: () => ({ ...state }),
+        availableVersion: () => state.available ? '0.2.0' : null,
+        async check() {},
+        async install(approvedBuilds?: string[]) {
+          installs.push(approvedBuilds)
+          Object.assign(state, { available: false, restartRequired: true, installedVersion: '0.2.0' })
+        },
+        setAutoCheck() {},
+      } as unknown as UpdateChecker)
+      await waitFor(() => client.messages.some((message) => message.type === 'update' && message.state === 'available'))
+      await waitFor(() => client.messages.some((message) => message.type === 'chrome' && message.update === '0.2.0'))
+
+      // The ball's menu row sends one word; the host runs the rest and narrates it back.
+      client.send({ type: 'update' })
+      await waitFor(() => client.messages.some((message) => message.type === 'update' && message.state === 'starting'))
+      await waitFor(() => client.messages.some((message) => message.type === 'update' && message.state === 'done'))
+      assert.deepEqual(installs, [undefined])
+      const done = client.messages.findLast((message) => message.type === 'update' && message.state === 'done')
+      assert.equal(done?.version, '0.2.0')
+      assert.equal(done?.restart, true)
+    } finally {
+      client.socket.end()
+      harness.runtime.halt()
+    }
+  })
+
+  it('cancels only the ball session, answers a question, and disables the helper', async () => {    const harness = boot()
     harness.holdPrompt()
     const client = await connect(harness.runtime)
     try {

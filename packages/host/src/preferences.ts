@@ -14,6 +14,7 @@ const SELECTION_FILE = 'selection-toolbar.json'
 const BALL_FILE = 'ball-enabled.json'
 const AVATAR_FILE = 'orb-avatar'
 const AVATAR_META_FILE = 'orb-avatar.json'
+const UPDATE_FILE = 'orb-update.json'
 
 export const PERMISSION_PRESETS = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
@@ -37,6 +38,18 @@ export type AvatarSelection =
   | { kind: 'default' }
   | { kind: 'custom'; mime: AvatarMime }
   | { kind: 'preset'; id: string }
+
+/** Last update check the profile remembers. `checkedAt` is Unix time in milliseconds. */
+export interface UpdateRecord {
+  readonly checkedAt: number
+  /** Newest version a registry reported, empty until one answers. */
+  readonly latestVersion: string
+  /** Version the ball already announced, so a restart does not repeat itself. */
+  readonly notifiedVersion: string
+  readonly autoCheck: boolean
+}
+
+const DEFAULT_UPDATE: UpdateRecord = { checkedAt: 0, latestVersion: '', notifiedVersion: '', autoCheck: true }
 
 const DEFAULT_MODEL: AgentModelSelection = {
   provider: 'deepseek-official',
@@ -76,6 +89,7 @@ export class ProfileStore {
   private selectionValue: boolean
   private selectionLanguage: 'zh' | 'en'
   private ballValue: boolean
+  private updateValue: UpdateRecord
 
   constructor(readonly dir: string) {
     const permission = readPermission(dir)
@@ -87,6 +101,7 @@ export class ProfileStore {
     this.selectionValue = selection.enabled
     this.selectionLanguage = selection.language
     this.ballValue = readBall(dir)
+    this.updateValue = readUpdate(dir)
   }
 
   permission(): PermissionPreset {
@@ -164,6 +179,15 @@ export class ProfileStore {
   setBallEnabled(enabled: boolean): void {
     this.ballValue = enabled
     writeJson(join(this.dir, BALL_FILE), { enabled })
+  }
+
+  updateRecord(): UpdateRecord {
+    return this.updateValue
+  }
+
+  setUpdateRecord(patch: Partial<UpdateRecord>): void {
+    this.updateValue = { ...this.updateValue, ...patch }
+    writeJson(join(this.dir, UPDATE_FILE), this.updateValue)
   }
 
   /** Bumped by every avatar change: the ball refetches on it, the settings preview re-renders on it. */
@@ -302,6 +326,17 @@ function readAvatarMime(dir: string): AvatarMime | undefined {
   const mime = record(readJson(join(dir, AVATAR_META_FILE)))?.mime
   if (mime === 'image/gif' || mime === 'image/png' || mime === 'image/webp') return mime
   return undefined
+}
+
+function readUpdate(dir: string): UpdateRecord {
+  const stored = record(readJson(join(dir, UPDATE_FILE)))
+  if (stored === undefined) return DEFAULT_UPDATE
+  return {
+    checkedAt: typeof stored.checkedAt === 'number' && Number.isFinite(stored.checkedAt) ? stored.checkedAt : 0,
+    latestVersion: typeof stored.latestVersion === 'string' ? stored.latestVersion : '',
+    notifiedVersion: typeof stored.notifiedVersion === 'string' ? stored.notifiedVersion : '',
+    autoCheck: typeof stored.autoCheck === 'boolean' ? stored.autoCheck : true,
+  }
 }
 
 function parseSelection(value: unknown): AgentModelSelection | undefined {

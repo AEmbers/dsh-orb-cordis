@@ -16,6 +16,7 @@ function loadSection() {
   const calls = []
   let mode = 'ready'
   let confirm = false
+  const intervals = []
   const snapshot = {
     supported: true,
     ballEnabled: true,
@@ -27,6 +28,20 @@ function loadSection() {
     selectionEnabled: false,
     millifractionEnabled: false,
     tcc: { applicable: true, appName: 'DeepSeek Harness', screen: 'missing', accessibility: 'granted' },
+    update: {
+      currentVersion: '0.1.0',
+      installedVersion: '0.1.0',
+      latestVersion: null,
+      available: false,
+      checking: false,
+      updating: false,
+      canUpdate: true,
+      autoCheck: true,
+      checkedAt: null,
+      restartRequired: false,
+      error: null,
+      pendingBuilds: [],
+    },
   }
   const catalog = {
     groups: [{
@@ -94,13 +109,26 @@ function loadSection() {
         return json(mode === 'linux' ? { ...snapshot, supported: false, tcc: { ...snapshot.tcc, applicable: false } } : snapshot)
       }
       if (path === '/.dsh-orb/models') return json(catalog)
+      if (path === '/.dsh-orb/update') return json(snapshot.update)
       if (options.method === 'POST' && path === '/.dsh-orb/ball') snapshot.ballEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/millifraction') snapshot.millifractionEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/overlay-model') snapshot.overlay = JSON.parse(options.body)
       if (options.method === 'POST' && path === '/.dsh-orb/avatar/preset') snapshot.avatarPresetId = JSON.parse(options.body).preset
+      if (options.method === 'POST' && path === '/.dsh-orb/update/check') {
+        snapshot.update = { ...snapshot.update, latestVersion: '0.2.0', available: true, checkedAt: 1700000000000 }
+      }
+      if (options.method === 'POST' && path === '/.dsh-orb/update/install') {
+        const builds = JSON.parse(options.body).approvedBuilds
+        snapshot.update = builds
+          ? { ...snapshot.update, error: null, pendingBuilds: [], updating: true }
+          : { ...snapshot.update, updating: true }
+      }
+      if (options.method === 'POST' && path === '/.dsh-orb/update/auto') snapshot.update = { ...snapshot.update, autoCheck: JSON.parse(options.body).enabled }
       if (options.method === 'POST') return json(snapshot)
       return { ok: false, status: 404, async text() { return JSON.stringify({ error: 'missing' }) } }
     },
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length },
+    clearInterval: () => {},
     console,
   }
   sandbox.window.__ModuleLoader__ = {
@@ -138,10 +166,27 @@ function loadSection() {
     spec: registered.spec,
     render,
     flush,
+    /** Re-render the page, then run the polling callback it registered while an install runs. */
+    async tick() {
+      ran.clear()
+      for (let index = 0; index < effects.length; index += 1) {
+        if (effects[index] === undefined || ran.has(index)) continue
+        ran.add(index)
+        await effects[index]()
+      }
+      await settle()
+      const pending = intervals.slice()
+      intervals.length = 0
+      for (const interval of pending) await interval.fn()
+      await settle()
+      return pending.length
+    },
     setMode(next) { mode = next },
     setConfirm(next) { confirm = next },
     setFile(next) { file = next },
     setLang(next) { sandbox.document.documentElement.lang = next },
+    /** Replace the whole update block, or drop it as a host without a version would. */
+    setUpdate(next) { snapshot.update = next === null ? undefined : { ...snapshot.update, ...next } },
     reset() {
       stateSlots.length = 0
       effects.length = 0
@@ -267,6 +312,80 @@ describe('settings section', () => {
     assert.equal(page.spec.label(), '悬浮球')
     page.setLang('')
     assert.equal(page.spec.label(), '悬浮球', 'no lang falls back to the browser languages')
+  })
+
+  it('offers the new version and installs it without leaving the page', async () => {
+    const page = loadSection()
+    let view = page.render()
+    await page.flush()
+    view = page.render()
+    const text = (node) => (node.children ?? []).filter((child) => typeof child === 'string').join('')
+    const texts = () => find(view, (node) => typeof node.type === 'string').map(text).join(' ')
+    assert.match(texts(), /当前版本 0\.1\.0。/)
+    assert.ok(find(view, (node) => node.props?.['aria-label'] === '自动检查更新')[0], 'the automatic check is switchable')
+    assert.equal(find(view, (node) => node.type === 'button' && text(node) === '更新').length, 0, 'no update is offered before one is known')
+
+    // The check finds a newer version: the card turns into a banner plus a button.
+    const check = find(view, (node) => node.type === 'button' && text(node) === '检查更新')[0]
+    assert.ok(check, 'a manual check is always available')
+    check.props.onClick()
+    await settle()
+    view = page.render()
+    assert.equal(page.calls.at(-1).path, '/.dsh-orb/update/check')
+    assert.match(texts(), /新版本 0\.2\.0 可用。/)
+    const install = find(view, (node) => node.type === 'button' && text(node) === '更新')[0]
+    assert.ok(install)
+
+    // Installing POSTs and then polls until the host reports the new state.
+    install.props.onClick()
+    await settle()
+    const installCall = page.calls.at(-1)
+    assert.equal(installCall.path, '/.dsh-orb/update/install')
+    assert.deepEqual(JSON.parse(installCall.options.body), {})
+    view = page.render()
+    assert.match(texts(), /正在更新到 0\.2\.0…/)
+    const before = page.calls.length
+    assert.equal(await page.tick(), 1, 'the page polls while the install runs')
+    assert.equal(page.calls.slice(before).some((call) => call.path === '/.dsh-orb/update'), true)
+
+    // A blocked install offers the approval retry with the pending package names.
+    page.setUpdate({ updating: false, available: true, error: 'build-blocked', pendingBuilds: ['koffi'] })
+    page.reset()
+    view = page.render()
+    await page.flush()
+    view = page.render()
+    assert.match(texts(), /更新失败：新版本依赖的安装脚本未获授权/)
+    const allow = find(view, (node) => node.type === 'button' && text(node) === '允许安装脚本并重试')[0]
+    assert.ok(allow)
+    allow.props.onClick()
+    await settle()
+    assert.deepEqual(JSON.parse(page.calls.at(-1).options.body), { approvedBuilds: ['koffi'] })
+
+    // Once installed, the card asks for the restart instead of offering the same version again.
+    page.setUpdate({ updating: false, available: false, error: null, restartRequired: true, installedVersion: '0.2.0', latestVersion: '0.2.0' })
+    page.reset()
+    view = page.render()
+    await page.flush()
+    view = page.render()
+    assert.match(texts(), /已更新到 0\.2\.0，重启 DeepSeek Harness 后生效。/)
+    assert.equal(find(view, (node) => node.type === 'button' && text(node) === '更新').length, 0)
+
+    const toggle = find(view, (node) => node.props?.['aria-label'] === '自动检查更新')[0]
+    toggle.props.onClick()
+    await settle()
+    assert.deepEqual(JSON.parse(page.calls.at(-1).options.body), { enabled: false })
+    assert.equal(page.calls.at(-1).path, '/.dsh-orb/update/auto')
+  })
+
+  it('leaves the update card out where the host has no version to report', async () => {
+    const page = loadSection()
+    page.setUpdate(null)
+    let view = page.render()
+    await page.flush()
+    view = page.render()
+    const texts = find(view, (node) => typeof node.type === 'string').map((node) => (node.children ?? []).filter((child) => typeof child === 'string').join('')).join(' ')
+    assert.equal(texts.includes('插件更新'), false)
+    assert.equal(texts.includes('检查更新'), false)
   })
 })
 

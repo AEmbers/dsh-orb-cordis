@@ -31,6 +31,8 @@ interface ChromeState {
   millifractionEnabled: boolean
   openMain: boolean
   catalog: MenuCatalog
+  /** Newer published version the host found, or null when there is nothing to install. */
+  update: string | null
 }
 
 const defaultSelection: MenuSelection = {
@@ -45,6 +47,7 @@ let chrome: ChromeState = {
   millifractionEnabled: false,
   openMain: false,
   catalog: { groups: [] },
+  update: null,
 }
 let avatarToken = 0
 // Raw preferences as stored; `theme` resolves through nativeTheme, an absent
@@ -335,6 +338,11 @@ function deliver(message: unknown): void {
     win.webContents.send('orb:status', (record as { text?: unknown }).text)
     return
   }
+  if (record.type === 'update') {
+    const text = updateStatusText(record as { state?: unknown; version?: unknown; reason?: unknown }, menuZh())
+    if (text !== '') win.webContents.send('orb:status', text)
+    return
+  }
   if (record.type === 'question') {
     win.webContents.send('orb:question', message)
     return
@@ -496,6 +504,7 @@ function readChrome(value: unknown): ChromeState {
     background?: MenuSelection
     millifractionEnabled?: unknown
     openMain?: unknown
+    update?: unknown
     catalog?: MenuCatalog
   }
   return {
@@ -503,6 +512,7 @@ function readChrome(value: unknown): ChromeState {
     background: selectionOr(record.background, chrome.background),
     millifractionEnabled: record.millifractionEnabled === true,
     openMain: record.openMain === true,
+    update: typeof record.update === 'string' && record.update !== '' ? record.update : null,
     catalog: record.catalog ?? { groups: [] },
   }
 }
@@ -518,9 +528,39 @@ async function showMenu(window: BrowserWindow): Promise<void> {
     setOverlay: (selection) => { write({ type: 'set-overlay', selection }) },
     setBackground: (selection) => { write({ type: 'set-background', selection }) },
     setMillifraction: (enabled) => { void confirmMillifraction(window, enabled) },
+    update: () => { write({ type: 'update' }) },
     disable: () => { write({ type: 'disable' }) },
   })
   Menu.buildFromTemplate(template).popup({ window })
+}
+
+/** One line for the ball's status area: the update runs in the host, the ball only narrates it. */
+function updateStatusText(message: { state?: unknown; version?: unknown; reason?: unknown }, zh: boolean): string {
+  const version = typeof message.version === 'string' ? message.version : ''
+  if (message.state === 'available') {
+    return zh ? `发现新版本 ${version}，右键球可更新` : `Version ${version} is available — right-click the ball to update`
+  }
+  if (message.state === 'starting') {
+    return zh ? `正在更新到 ${version}…` : `Updating to ${version}…`
+  }
+  if (message.state === 'done') {
+    return zh ? `已更新到 ${version}，重启 DeepSeek Harness 后生效` : `Updated to ${version} — restart DeepSeek Harness to apply it`
+  }
+  if (message.state === 'failed') {
+    return zh ? `更新失败：${updateFailureText(message.reason, true)}` : `Update failed: ${updateFailureText(message.reason, false)}`
+  }
+  return ''
+}
+
+function updateFailureText(reason: unknown, zh: boolean): string {
+  if (reason === 'build-blocked') {
+    return zh ? '安装脚本未获授权，请在设置页允许后重试' : 'install scripts need approval — allow them in settings and retry'
+  }
+  if (reason === 'incompatible-version') {
+    return zh ? '当前 Harness 版本与新版不兼容' : 'the new version is incompatible with this Harness build'
+  }
+  if (typeof reason === 'string' && reason !== '') return reason
+  return zh ? '未知错误' : 'unknown error'
 }
 
 async function confirmMillifraction(window: BrowserWindow, enabled: boolean): Promise<void> {

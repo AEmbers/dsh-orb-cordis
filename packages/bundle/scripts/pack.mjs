@@ -4,7 +4,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,6 +23,10 @@ try {
   delete manifest.scripts
   delete manifest.devDependencies
   await writeFile(join(pkgDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  // npm renders these on the package page; the build tree itself never holds them.
+  for (const name of ['README.md', 'LICENSE']) {
+    await cp(join(repoRoot, name), join(pkgDir, name))
+  }
 
   const packed = spawnSync('npm', ['pack', '--pack-destination', repoRoot], { cwd: pkgDir, stdio: 'inherit' })
   if (packed.status !== 0) process.exit(packed.status ?? 1)

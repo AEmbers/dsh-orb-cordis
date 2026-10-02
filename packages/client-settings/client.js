@@ -59,6 +59,21 @@ window.__ModuleLoader__.load({
       tccGranted: '已开启',
       tccRelaunch: '已开启，请退出后重开',
       tccFooter: '打开开关后必须完全退出 {name} 再打开。只关主窗口无效。',
+      updateTitle: '插件更新',
+      updateCurrent: '当前版本 {version}。',
+      updateAvailable: '新版本 {version} 可用。',
+      updateNow: '更新',
+      updating: '正在更新到 {version}…',
+      updateDone: '已更新到 {version}，重启 {name} 后生效。',
+      updateFailed: '更新失败：',
+      updateOffline: '无法连接镜像或 npm，请检查网络后重试。',
+      updateBuildBlocked: '新版本依赖的安装脚本未获授权，安装已停止。',
+      updateAllowBuilds: '允许安装脚本并重试',
+      updateCheck: '检查更新',
+      updateChecking: '正在检查…',
+      updateAuto: '自动检查更新',
+      updateAutoDescription: '每天一次向 npmmirror（失败回退 npm）查询新版本，不发送任何标识信息。',
+      updateManual: '当前 Harness 没有提供插件管理服务，请在插件页手动更新。',
     }
     const en = {
       nav: 'Floating ball',
@@ -113,6 +128,21 @@ window.__ModuleLoader__.load({
       tccGranted: 'On',
       tccRelaunch: 'On — quit and reopen',
       tccFooter: 'After you turn the switches on, quit {name} fully, then open it again. Closing the main window does not quit.',
+      updateTitle: 'Plugin update',
+      updateCurrent: 'Version {version}.',
+      updateAvailable: 'Version {version} is available.',
+      updateNow: 'Update',
+      updating: 'Updating to {version}…',
+      updateDone: 'Updated to {version}. Restart {name} to apply it.',
+      updateFailed: 'Update failed: ',
+      updateOffline: 'no registry could be reached. Check the network and try again.',
+      updateBuildBlocked: 'A dependency of the new version needs install-script approval, so the install stopped.',
+      updateAllowBuilds: 'Allow these scripts and retry',
+      updateCheck: 'Check for updates',
+      updateChecking: 'Checking…',
+      updateAuto: 'Check for updates automatically',
+      updateAutoDescription: 'Asks npmmirror once a day (falling back to npm) for the newest version. Nothing identifying is sent.',
+      updateManual: 'This Harness build ships no plugin manager — update from the Plugins page instead.',
     }
 
     // The main window's resolved locale rides <html lang> (dsh-client-locale);
@@ -269,6 +299,23 @@ window.__ModuleLoader__.load({
         return () => { window.removeEventListener?.('focus', onFocus) }
       }, [])
 
+      // An install runs for minutes inside the host; the page polls it instead of holding a request open.
+      const installing = state.snapshot?.update?.updating === true
+      React.useEffect(() => {
+        if (!installing) return undefined
+        const timer = setInterval(() => { void refreshUpdate() }, 2000)
+        return () => { clearInterval(timer) }
+      }, [installing])
+
+      async function refreshUpdate() {
+        try {
+          const update = await request('/.dsh-orb/update')
+          setState((prev) => prev.snapshot ? { ...prev, snapshot: { ...prev.snapshot, update } } : prev)
+        } catch {
+          // Keep the last known state; the next poll or a page reload tries again.
+        }
+      }
+
       async function mutate(path, body, avatarError) {
         setState((prev) => ({ ...prev, busy: true, avatarError: avatarError || '' }))
         try {
@@ -317,6 +364,8 @@ window.__ModuleLoader__.load({
         snap.permissionFallback === true
           ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.permissionFallback)
           : null,
+        // Outside the fieldset: an update is worth offering even where the ball itself is off.
+        updateCard(text, snap, mutate),
         h('fieldset', { className: 'dsh-orb-set-fields', disabled },
           card(text.ball, text.ballDescription, h(Toggle, {
             checked: snap.ballEnabled === true,
@@ -391,6 +440,75 @@ window.__ModuleLoader__.load({
       }
       if (snap.helperError === 'runtime-download') {
         return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.runtimeFailed)
+      }
+      return null
+    }
+
+    /** Current version, the newest published one, and the one-click upgrade. */
+    function updateCard(text, snap, mutate) {
+      const update = snap.update
+      // No version means an unknown install layout (a source checkout): stay out of the way.
+      if (!update || !update.currentVersion) return null
+      const installed = update.installedVersion || update.currentVersion
+      const control = update.available
+        ? h('button', {
+          type: 'button',
+          className: 'dsh-orb-set-button',
+          disabled: update.updating,
+          onClick: () => { void mutate('/.dsh-orb/update/install', {}) },
+        }, update.updating ? text.updating.replaceAll('{version}', update.latestVersion || installed) : text.updateNow)
+        : h('button', {
+          type: 'button',
+          className: 'dsh-orb-set-button dsh-orb-set-ghost',
+          disabled: update.checking,
+          onClick: () => { void mutate('/.dsh-orb/update/check', {}) },
+        }, update.checking ? text.updateChecking : text.updateCheck)
+      const allowBuilds = update.error === 'build-blocked' && Array.isArray(update.pendingBuilds) && update.pendingBuilds.length > 0
+        ? h('button', {
+          type: 'button',
+          className: 'dsh-orb-set-button',
+          onClick: () => { void mutate('/.dsh-orb/update/install', { approvedBuilds: update.pendingBuilds }) },
+        }, text.updateAllowBuilds)
+        : null
+      return h('section', { className: 'dsh-orb-set-card' },
+        h('h3', null, text.updateTitle),
+        updateNotice(text, snap, update),
+        allowBuilds,
+        h('div', { className: 'dsh-orb-set-row' },
+          h('div', null, h('p', null, text.updateCurrent.replaceAll('{version}', installed))),
+          control),
+        update.canUpdate ? null : h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.updateManual),
+        h('div', { className: 'dsh-orb-set-row' },
+          h('div', null, h('p', null, text.updateAutoDescription)),
+          h(Toggle, {
+            checked: update.autoCheck === true,
+            label: text.updateAuto,
+            disabled: false,
+            onChange: (enabled) => { void mutate('/.dsh-orb/update/auto', { enabled }) },
+          })))
+    }
+
+    function updateNotice(text, snap, update) {
+      if (update.updating) {
+        return h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.updating.replaceAll('{version}', update.latestVersion || update.installedVersion))
+      }
+      if (update.error) {
+        const detail = update.error === 'network'
+          ? text.updateOffline
+          : update.error === 'build-blocked'
+            ? text.updateBuildBlocked
+            : update.error
+        return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, `${text.updateFailed}${detail}`)
+      }
+      if (update.restartRequired) {
+        const app = snap.tcc && snap.tcc.appName ? snap.tcc.appName : 'DeepSeek Harness'
+        return h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.updateDone
+          .replaceAll('{version}', update.installedVersion)
+          .replaceAll('{name}', app))
+      }
+      if (update.available) {
+        return h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.updateAvailable
+          .replaceAll('{version}', update.latestVersion))
       }
       return null
     }

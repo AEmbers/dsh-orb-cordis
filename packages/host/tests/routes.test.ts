@@ -73,6 +73,7 @@ describe('settings routes', () => {
     mkdirSync(profile, { recursive: true })
     const store = new ProfileStore(profile)
     const calls: unknown[] = []
+    let autoCheck = true
     const control: OrbControl = {
       helperAuthorized: (token) => tokensMatch(token, 'helper-secret'),
       async publishChrome() { calls.push('chrome') },
@@ -81,6 +82,23 @@ describe('settings routes', () => {
       async setSelectionEnabled(enabled) { store.setSelectionEnabled(enabled) },
       async setMillifractionEnabled(enabled) { store.setMillifractionEnabled(enabled) },
       async setBallEnabled(enabled) { store.setBallEnabled(enabled) },
+      updateState: () => ({
+        currentVersion: '0.1.0',
+        installedVersion: '0.1.0',
+        latestVersion: '0.2.0',
+        available: true,
+        checking: false,
+        updating: false,
+        canUpdate: true,
+        autoCheck,
+        checkedAt: 1700000000000,
+        restartRequired: false,
+        error: null,
+        pendingBuilds: [],
+      }),
+      async checkUpdate() { calls.push('check') },
+      installUpdate(builds) { calls.push(['install', builds]) },
+      setAutoCheck(enabled) { autoCheck = enabled; calls.push(['auto', enabled]) },
     }
     let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
     const dispose = registerOrbRoutes({
@@ -133,6 +151,7 @@ describe('settings routes', () => {
       overlay: { model: string }
       supported: boolean
       permissionFallback: boolean
+      update: { currentVersion: string; latestVersion: string; available: boolean; autoCheck: boolean }
     }
     assert.equal(settings.status, 200)
     assert.equal(snapshot.avatarUrl, '/.dsh-orb/avatar?v=0')
@@ -141,6 +160,20 @@ describe('settings routes', () => {
     assert.equal(snapshot.overlay.model, 'deepseek-flash')
     assert.equal(snapshot.supported, process.platform === 'darwin' || process.platform === 'win32')
     assert.equal(snapshot.permissionFallback, false)
+    assert.deepEqual(snapshot.update, {
+      currentVersion: '0.1.0',
+      installedVersion: '0.1.0',
+      latestVersion: '0.2.0',
+      available: true,
+      checking: false,
+      updating: false,
+      canUpdate: true,
+      autoCheck: true,
+      checkedAt: 1700000000000,
+      restartRequired: false,
+      error: null,
+      pendingBuilds: [],
+    })
 
     const models = response()
     await handler(request('GET', '/.dsh-orb/models', undefined, { 'x-dsh-user': 'ok' }), models)
@@ -240,4 +273,91 @@ describe('settings routes', () => {
     assert.equal(missing.status, 404)
     dispose()
   })
+
+  it('exposes the update state, the manual check, and the install request', async () => {
+    const profile = join(root, 'profile-update')
+    mkdirSync(profile, { recursive: true })
+    const store = new ProfileStore(profile)
+    const calls: unknown[] = []
+    const control: OrbControl = {
+      helperAuthorized: () => false,
+      async publishChrome() {},
+      async setOverlayModel() {},
+      async setBackgroundModel() {},
+      async setSelectionEnabled() {},
+      async setMillifractionEnabled() {},
+      async setBallEnabled() {},
+      updateState: () => ({ ...emptyUpdate, currentVersion: '0.1.0', installedVersion: '0.1.0' }),
+      async checkUpdate() { calls.push('check') },
+      installUpdate(builds) { calls.push(['install', builds]) },
+      setAutoCheck(enabled) { calls.push(['auto', enabled]) },
+    }
+    let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+    const dispose = registerOrbRoutes({
+      ctx: {
+        webServer: { register(route) { handler = route.handler; return () => { handler = undefined } } },
+        connection: {
+          admit(req) {
+            return req.headers['x-dsh-user'] === 'ok' ? { peer: { id: 'local' } } : { rejection: 401 }
+          },
+        },
+        sessionController: { modelCatalog: () => ({ groups: [] }) },
+      },
+      store,
+      tcc: new TccMonitor(),
+      control,
+    })
+    assert.ok(handler)
+
+    const denied = response()
+    await handler(request('GET', '/.dsh-orb/update'), denied)
+    assert.equal(denied.status, 401)
+
+    const state = response()
+    await handler(request('GET', '/.dsh-orb/update', undefined, { 'x-dsh-user': 'ok' }), state)
+    assert.equal(state.status, 200)
+    assert.equal((JSON.parse(state.body.toString('utf8')) as { currentVersion: string }).currentVersion, '0.1.0')
+
+    const checked = response()
+    await handler(request('POST', '/.dsh-orb/update/check', '{}', { 'x-dsh-user': 'ok' }), checked)
+    assert.equal(checked.status, 200)
+    assert.equal(calls.includes('check'), true)
+    assert.deepEqual((JSON.parse(checked.body.toString('utf8')) as { update: { currentVersion: string } }).update.currentVersion, '0.1.0')
+
+    // The install answers at once with a snapshot: the page polls instead of waiting it out.
+    const installed = response()
+    await handler(request('POST', '/.dsh-orb/update/install', JSON.stringify({ approvedBuilds: ['koffi'] }), { 'x-dsh-user': 'ok' }), installed)
+    assert.equal(installed.status, 200)
+    assert.deepEqual(calls.at(-1), ['install', ['koffi']])
+
+    const bare = response()
+    await handler(request('POST', '/.dsh-orb/update/install', '{}', { 'x-dsh-user': 'ok' }), bare)
+    assert.deepEqual(calls.at(-1), ['install', undefined])
+
+    const auto = response()
+    await handler(request('POST', '/.dsh-orb/update/auto', JSON.stringify({ enabled: false }), { 'x-dsh-user': 'ok' }), auto)
+    assert.deepEqual(calls.at(-1), ['auto', false])
+
+    const invalid = response()
+    await handler(request('POST', '/.dsh-orb/update/auto', JSON.stringify({ enabled: 'yes' }), { 'x-dsh-user': 'ok' }), invalid)
+    assert.equal(invalid.status, 400)
+    assert.equal(JSON.parse(invalid.body.toString('utf8')).error, 'invalid-auto-check')
+    dispose()
+  })
 })
+
+/** Update state a host without a checker answers, for tests that only exercise one route. */
+const emptyUpdate = {
+  currentVersion: '',
+  installedVersion: '',
+  latestVersion: null,
+  available: false,
+  checking: false,
+  updating: false,
+  canUpdate: false,
+  autoCheck: false,
+  checkedAt: null,
+  restartRequired: false,
+  error: null,
+  pendingBuilds: [],
+}
