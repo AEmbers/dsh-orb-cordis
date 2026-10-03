@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProfileStore } from '../src/preferences.ts'
-import { AUTO_CHECK_INTERVAL_MS, compareVersions, ownPackage, UpdateChecker } from '../src/update.ts'
+import { AUTO_CHECK_INTERVAL_MS, compareVersions, ownPackage, releaseTarballUrl, UpdateChecker, versionFromRelease } from '../src/update.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'orb-update-'))
 after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -64,6 +64,20 @@ describe('update versions', () => {
 
   it('reads the installed manifest and refuses to guess one', () => {
     assert.deepEqual(ownPackage(), undefined, 'running from packages/host/lib finds no manifest')
+  })
+
+  it('derives the release tag and tarball address from a version', () => {
+    assert.equal(versionFromRelease('{"tag_name":"plugin-v0.2.0"}'), '0.2.0')
+    assert.equal(versionFromRelease('{"tag_name":"plugin-v0.2.0-rc.1"}'), '0.2.0-rc.1')
+    assert.equal(versionFromRelease('{"name":"unrelated"}'), undefined)
+    assert.equal(versionFromRelease('not json'), undefined)
+    assert.equal(
+      releaseTarballUrl('0.2.0'),
+      'https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.2.0/dsh-orb-0.2.0.tgz',
+    )
+    process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
+    assert.equal(releaseTarballUrl('0.2.0'), 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz')
+    delete process.env.DSH_ORB_UPDATE_URL
   })
 })
 
@@ -157,12 +171,14 @@ describe('update checker', () => {
     assert.equal(update.state().autoCheck, true)
   })
 
-  it('runs the official installer for the version it found', async () => {
+  it('runs the official installer against the release tarball', async () => {
     const profile = store()
     const { update, specs } = checker({ store: profile, latest: '0.2.0' })
     await update.check()
     await update.install()
-    assert.deepEqual(specs, ['dsh-orb@0.2.0'])
+    assert.deepEqual(specs, [
+      'https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.2.0/dsh-orb-0.2.0.tgz',
+    ])
     const state = update.state()
     assert.equal(state.updating, false)
     assert.equal(state.error, null)

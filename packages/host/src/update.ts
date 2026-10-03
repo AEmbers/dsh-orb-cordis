@@ -1,18 +1,16 @@
 /**
  * Update check and one-click upgrade for the installed bundle.
- * The npm registry is the distribution channel: npmmirror answers first because
- * github.com and the npm registry itself are unreliable from mainland China.
+ * GitHub Releases is the distribution channel: the check reads the repository's
+ * latest release and the upgrade installs the release's tarball through the
+ * official plugin manager.
  */
 
 import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import type { ProfileStore } from './preferences.ts'
 
-/** Registries asked in turn. Both answer `/<name>/latest` as plain JSON without credentials. */
-export const UPDATE_REGISTRIES = [
-  'https://registry.npmmirror.com',
-  'https://registry.npmjs.org',
-]
+/** The GitHub repository that publishes plugin releases, `plugin-v<version>` tags. */
+export const UPDATE_REPO = 'mini-yifan/dsh-orb-cordis'
 
 /** How long a remembered answer stays fresh for the automatic check. */
 export const AUTO_CHECK_INTERVAL_MS = 60 * 60 * 1000
@@ -135,7 +133,7 @@ function isPluginManager(value: unknown): value is PluginManager {
 }
 
 /**
- * Checks the registry for a newer version and runs the official installer.
+ * Checks the repository's latest release and runs the official installer.
  * Every failure stays inside this class: the update path must never break the ball.
  */
 export class UpdateChecker {
@@ -202,7 +200,7 @@ export class UpdateChecker {
   }
 
   /**
-   * Ask every registry in turn for the newest published version.
+   * Ask the repository's latest release for the newest published version.
    * The automatic call is throttled by {@link AUTO_CHECK_INTERVAL_MS}; `/update/check` is not.
    */
   async check(manual = false): Promise<void> {
@@ -232,8 +230,10 @@ export class UpdateChecker {
   }
 
   /**
-   * Install the version the check found through the official plugin manager.
-   * The manager owns the profile lock, the registry fallback and the manifest restore.
+   * Install the version the check found through the official plugin manager,
+   * from the release tarball the version names. The manager owns the profile
+   * lock, the download and the manifest restore; an already-installed bundle is
+   * replaced and the result says the restart carries the new code.
    */
   async install(approvedBuilds?: string[]): Promise<void> {
     const version = this.availableVersion()
@@ -243,7 +243,7 @@ export class UpdateChecker {
     this.error = null
     this.pendingBuilds = []
     try {
-      const result = await manager.installBundle(`${this.own.name}@${version}`, {
+      const result = await manager.installBundle(releaseTarballUrl(version), {
         requestId: `dsh-orb-update-${Date.now()}`,
         ...approvedBuilds === undefined ? {} : { approvedBuilds },
       })
@@ -276,11 +276,44 @@ export class UpdateChecker {
     const own = this.own
     if (own === undefined) return undefined
     if (this.deps.fetchLatest !== undefined) return this.deps.fetchLatest(own.name)
-    for (const registry of registries()) {
-      const body = await curlText(`${registry}/${own.name}/latest`)
-      const version = body === undefined ? undefined : versionFrom(body)
-      if (version !== undefined) return version
-    }
+    const forced = process.env.DSH_ORB_UPDATE_LATEST?.trim()
+    if (forced !== undefined && forced !== '') return forced
+    const body = await curlText(`${apiBase()}/releases/latest`)
+    return body === undefined ? undefined : versionFromRelease(body)
+  }
+}
+
+/** The API base the check asks; `DSH_ORB_UPDATE_API` re-points it (tests, mirrors). */
+function apiBase(): string {
+  const configured = process.env.DSH_ORB_UPDATE_API?.trim()
+  if (configured !== undefined && configured !== '') return configured.replace(/\/+$/, '')
+  return `https://api.github.com/repos/${UPDATE_REPO}`
+}
+
+/** The tag a release publishes: version 0.2.0 ships as `plugin-v0.2.0`. */
+export function releaseTag(version: string): string {
+  return `plugin-v${version.trim().replace(/^v/, '')}`
+}
+
+/**
+ * The tarball a release attaches, the name `pnpm pack` produces for the bundle.
+ * `DSH_ORB_UPDATE_URL` overrides the whole address (tests, staged releases).
+ */
+export function releaseTarballUrl(version: string): string {
+  const clean = version.trim().replace(/^v/, '')
+  const overridden = process.env.DSH_ORB_UPDATE_URL?.trim()
+  if (overridden !== undefined && overridden !== '') return overridden
+  return `https://github.com/${UPDATE_REPO}/releases/download/${releaseTag(clean)}/dsh-orb-${clean}.tgz`
+}
+
+/** The version a release names: `plugin-v0.2.0` → `0.2.0`. */
+export function versionFromRelease(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { tag_name?: unknown }
+    if (typeof parsed.tag_name !== 'string') return undefined
+    const version = parsed.tag_name.trim().replace(/^plugin-v/, '')
+    return version === '' ? undefined : version
+  } catch {
     return undefined
   }
 }
@@ -316,33 +349,16 @@ function comparePrerelease(left: string, right: string): number {
   return 0
 }
 
-function registries(): string[] {
-  const configured = process.env.DSH_ORB_UPDATE_REGISTRY?.trim()
-  if (configured !== undefined && configured !== '') return [configured.replace(/\/+$/, '')]
-  return UPDATE_REGISTRIES
-}
-
-function versionFrom(body: string): string | undefined {
-  try {
-    const parsed = JSON.parse(body) as { version?: unknown }
-    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /**
- * `DSH_ORB_UPDATE_LATEST` answers the check without a network round trip: a test switch
- * for the update UI, and the only way to see it before the first npm release.
+ * Fetch a plain-text body. HTTPS answers are pinned to https end to end; a
+ * plain-http address (the local mock) keeps its scheme so the loopback works.
  */
 async function curlText(url: string): Promise<string | undefined> {
-  const forced = process.env.DSH_ORB_UPDATE_LATEST?.trim()
-  if (forced !== undefined && forced !== '') return JSON.stringify({ version: forced })
+  const proto = url.startsWith('https://') ? ['--proto', '=https', '--proto-redir', '=https'] : []
   return new Promise((resolve) => {
     const child = spawn('curl', [
       '-fsSL',
-      '--proto', '=https',
-      '--proto-redir', '=https',
+      ...proto,
       '--connect-timeout', '5',
       '--max-time', '15',
       url,

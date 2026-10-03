@@ -89,9 +89,10 @@ describe('dsh-orb install layout', () => {
   })
 
   it('resolves every patch row when the tarball is unpacked into the profile', () => {
+    const { version } = JSON.parse(readFileSync(join(bundle, 'package.json'), 'utf8'))
     const packed = spawnSync(process.execPath, [join(bundle, 'scripts/pack.mjs')], { cwd: repo, stdio: 'pipe', encoding: 'utf8' })
     assert.equal(packed.status, 0, packed.stderr)
-    const tarball = join(repo, 'dsh-orb-0.0.0.tgz')
+    const tarball = join(repo, `dsh-orb-${version}.tgz`)
     assert.ok(existsSync(tarball))
     try {
       const profile = profileWith((target) => {
@@ -104,10 +105,22 @@ describe('dsh-orb install layout', () => {
       const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
       assert.equal(manifest.devDependencies, undefined)
       assert.equal(manifest.scripts, undefined)
-      for (const spec of Object.values({ ...manifest.dependencies })) {
-        assert.doesNotMatch(String(spec), /^(file|link|workspace):/)
+      // Self-contained: no dependency resolves from a registry. The runtime deps ship
+      // inside the package (koffi with its platform prebuilds, scriptless so pnpm has
+      // nothing to gate); the @deepseek-ai peers stay declared for the host's check.
+      assert.equal(manifest.dependencies, undefined)
+      assert.deepEqual(Object.keys(manifest.peerDependencies ?? {}).length > 0, true)
+      for (const rel of [
+        'node_modules/koffi/package.json',
+        'node_modules/zod/package.json',
+        'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64/koffi.node',
+        'node_modules/@koromix/koffi-darwin-x64/darwin_x64/koffi.node',
+        'node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node',
+      ]) {
+        assert.ok(existsSync(join(root, rel)), rel)
       }
-      assert.deepEqual(Object.keys(manifest.dependencies).sort(), ['koffi', 'zod'])
+      const koffi = JSON.parse(readFileSync(join(root, 'node_modules/koffi/package.json'), 'utf8'))
+      assert.equal(koffi.scripts, undefined, 'no install script for pnpm to gate')
     } finally {
       rmSync(tarball, { force: true })
     }
