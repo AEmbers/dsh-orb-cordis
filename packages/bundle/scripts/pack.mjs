@@ -8,10 +8,10 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const bundleRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -67,12 +67,17 @@ try {
     // npmmirror: the prebuilds are pure tarballs, and the mirror is reachable where
     // registry.npmjs.org stalls. `DSH_ORB_PACK_REGISTRY` re-points it.
     const registry = process.env.DSH_ORB_PACK_REGISTRY?.trim() || 'https://registry.npmmirror.com/'
-    const packed = spawnSync('npm', ['pack', `${platform}@${version}`, '--registry', registry, '--pack-destination', fetchDir], {
-      cwd: fetchDir, stdio: 'pipe', encoding: 'utf8', timeout: 120_000,
+    // `npm` is `npm.cmd` on Windows: only a shell resolves it (and Node refuses .cmd
+    // targets outright). One command string, no spaces in any token, and a relative
+    // pack destination so a space in the temp path cannot split the line.
+    const packed = spawnSync(`npm pack ${platform}@${version} --registry ${registry} --pack-destination .`, {
+      cwd: fetchDir, stdio: 'pipe', encoding: 'utf8', timeout: 120_000, shell: true,
     })
     if (packed.status !== 0 || packed.error !== undefined) throw new Error(`pack: npm pack ${platform}@${version} failed: ${packed.stderr || packed.error}`)
-    const tarball = join(fetchDir, packed.stdout.trim().split('\n').pop())
-    const extracted = spawnSync('tar', ['-xzf', tarball, '-C', fetchDir], { stdio: 'pipe' })
+    const tarball = join(fetchDir, packed.stdout.trim().split(/\r?\n/).pop())
+    // GNU tar reads a drive-letter `C:\...` archive name as a remote host; a relative
+    // name next to the cwd works for it and for the Windows bsdtar alike.
+    const extracted = spawnSync('tar', ['-xzf', basename(tarball)], { cwd: fetchDir, stdio: 'pipe' })
     if (extracted.status !== 0) throw new Error(`pack: extracting ${tarball} failed`)
     return join(fetchDir, 'package')
   }
@@ -106,8 +111,20 @@ try {
 
   // `tar` rather than `npm pack`: the packlist would drop the bundled `node_modules`,
   // and the whole point is a tarball that installs without touching any registry.
+  // Everything tar sees stays relative — GNU tar (Git for Windows) reads a
+  // drive-letter `C:\...` argument, even for `-C`, as a remote host.
   const tarball = join(repoRoot, `dsh-orb-${manifest.version}.tgz`)
-  const packed = spawnSync('tar', ['-czf', tarball, '-C', stage, 'package'], { stdio: 'inherit' })
+  const staged = join(stage, 'package.tgz')
+  const packed = spawnSync('tar', ['-czf', basename(staged), 'package'], { cwd: stage, stdio: 'inherit' })
+  if (packed.status !== 0) process.exit(packed.status ?? 1)
+  try {
+    await rename(staged, tarball)
+  } catch (error) {
+    // Temp and repo can sit on different volumes; tar must not see either absolute path.
+    if (error.code !== 'EXDEV') throw error
+    await copyFile(staged, tarball)
+    await rm(staged)
+  }
   if (packed.status !== 0) process.exit(packed.status ?? 1)
   console.log(`dsh-orb: packed ${tarball}`)
 } finally {

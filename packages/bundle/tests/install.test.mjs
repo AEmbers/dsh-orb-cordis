@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, basename, join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
@@ -70,6 +70,11 @@ function checkInstalled(profile, root) {
   assert.equal(readdirSync(join(root, 'dist/host')).includes('index.js'), true)
 }
 
+/** A link a test can create: junctions need no privilege on Windows, symlinks do. */
+function linkDir(target, link) {
+  symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
 describe('dsh-orb install layout', () => {
   // Assembled into a scratch folder so a linked desktop install is never rewritten while it runs.
   const assembled = join(scratch, 'assembled')
@@ -77,11 +82,11 @@ describe('dsh-orb install layout', () => {
     const built = spawnSync(process.execPath, [join(bundle, 'scripts/assemble.mjs'), '--out', assembled], { stdio: 'pipe', encoding: 'utf8' })
     assert.equal(built.status, 0, built.stderr)
     // A real link resolves dependencies from the package's own folder; give the copy the same view.
-    symlinkSync(join(bundle, 'node_modules'), join(assembled, 'node_modules'), 'dir')
+    linkDir(join(bundle, 'node_modules'), join(assembled, 'node_modules'))
   })
 
   it('resolves every patch row from the profile root when the folder is linked', async () => {
-    const profile = profileWith((target) => symlinkSync(assembled, target, 'dir'))
+    const profile = profileWith((target) => linkDir(assembled, target))
     checkInstalled(profile, join(profile, 'node_modules', 'dsh-orb'))
     const host = await import(pathToFileURL(resolveFromProfile(profile, 'dsh-orb/host')).href)
     assert.equal(typeof host.apply, 'function')
@@ -97,8 +102,17 @@ describe('dsh-orb install layout', () => {
     try {
       const profile = profileWith((target) => {
         mkdirSync(target, { recursive: true })
-        const untar = spawnSync('tar', ['-xzf', tarball, '-C', target, '--strip-components=1'], { encoding: 'utf8' })
-        assert.equal(untar.status, 0, untar.stderr)
+        // Extract by bare name beside the cwd: GNU tar (Git for Windows) reads a
+        // drive-letter path in `-f` or `-C` as a remote host, so no absolute
+        // path may reach tar.
+        const local = join(target, basename(tarball))
+        copyFileSync(tarball, local)
+        try {
+          const untar = spawnSync('tar', ['-xzf', basename(tarball), '--strip-components=1'], { cwd: target, encoding: 'utf8' })
+          assert.equal(untar.status, 0, untar.stderr)
+        } finally {
+          rmSync(local, { force: true })
+        }
       })
       const root = join(profile, 'node_modules', 'dsh-orb')
       checkInstalled(profile, root)

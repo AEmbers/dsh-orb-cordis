@@ -183,6 +183,11 @@ function hashFromSums(sums: string, fileName: string): string {
 
 const CURL_HTTPS = ['--proto', '=https', '--proto-redir', '=https']
 
+/** The Windows schannel backend aborts when a revocation check cannot complete
+ * (common behind proxies); every download is checksum-verified anyway. Other
+ * TLS backends ignore the flag. */
+const CURL_TLS = process.platform === 'win32' ? ['--ssl-no-revoke'] : []
+
 /** How long a dead host may burn before curl gives up and the next source is asked. */
 const CONNECT_TIMEOUT_SECONDS = '5'
 
@@ -205,7 +210,7 @@ async function fetchText(path: string): Promise<string> {
   for (const url of releaseUrls(path)) {
     try {
       const { stdout } = await run('curl', [
-        '-fsSL', ...CURL_HTTPS,
+        '-fsSL', ...CURL_HTTPS, ...CURL_TLS,
         '--connect-timeout', CONNECT_TIMEOUT_SECONDS,
         '--max-time', '60', url,
       ])
@@ -226,7 +231,7 @@ async function downloadVerifiedZip(fileName: string, expected: string, dest: str
     try {
       await rm(dest, { force: true })
       await run('curl', [
-        '-fsSL', ...CURL_HTTPS, '--retry', '2', '--retry-delay', '1',
+        '-fsSL', ...CURL_HTTPS, ...CURL_TLS, '--retry', '2', '--retry-delay', '1',
         '--connect-timeout', CONNECT_TIMEOUT_SECONDS,
         '--speed-limit', '100000', '--speed-time', '20',
         '--max-time', '300', '-o', dest, url,

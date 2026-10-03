@@ -1,4 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -127,6 +129,68 @@ describe('update checker', () => {
     assert.equal(offline.update.state().error, 'network')
     assert.equal(offline.update.state().latestVersion, '0.2.0')
     assert.equal(offline.update.state().available, true)
+  })
+
+  it('reads a repository without releases as checked and quiet, over real HTTP', async () => {
+    // The GitHub API answers 404 for /releases/latest until the first release ships.
+    const server = createServer((request, response) => {
+      if (request.url !== '/releases/latest') response.destroy()
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end('{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}')
+    })
+    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve) })
+    const previous = process.env.DSH_ORB_UPDATE_API
+    process.env.DSH_ORB_UPDATE_API = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      const profile = store()
+      const fake = manager()
+      const update = new UpdateChecker({
+        store: profile,
+        manager: () => fake.service,
+        notify: () => {},
+        own: { name: 'dsh-orb', version: '0.1.0' },
+      })
+      await update.check(true)
+      const state = update.state()
+      assert.equal(state.error, null, 'no release published yet is not a failure')
+      assert.equal(state.available, false)
+      assert.equal(state.latestVersion, null)
+      assert.ok(state.checkedAt !== null, 'the throttle still records the answer')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_ORB_UPDATE_API
+      else process.env.DSH_ORB_UPDATE_API = previous
+      server.close()
+    }
+  })
+
+  it('resolves the latest version through curl end to end', async () => {
+    const server = createServer((request, response) => {
+      if (request.url !== '/releases/latest') response.destroy()
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"tag_name":"plugin-v0.2.0","name":"0.2.0"}')
+    })
+    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve) })
+    const previous = process.env.DSH_ORB_UPDATE_API
+    process.env.DSH_ORB_UPDATE_API = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      const profile = store()
+      const announced: string[] = []
+      const fake = manager()
+      const update = new UpdateChecker({
+        store: profile,
+        manager: () => fake.service,
+        notify: (version) => announced.push(version),
+        own: { name: 'dsh-orb', version: '0.1.0' },
+      })
+      await update.check(true)
+      assert.deepEqual(announced, ['0.2.0'])
+      assert.equal(update.state().available, true)
+      assert.equal(update.state().error, null)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_ORB_UPDATE_API
+      else process.env.DSH_ORB_UPDATE_API = previous
+      server.close()
+    }
   })
 
   it('throttles the automatic check but not a manual one', async () => {

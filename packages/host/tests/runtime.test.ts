@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection, type Socket } from 'node:net'
@@ -63,8 +63,13 @@ interface Harness {
 
 function boot(extra: {
   tcc?: { status(): TccStatus; open(right: TccRight): Promise<void> }
+  /** Pre-seed the coordinate mode: without it the default is millifraction on Windows. */
+  millifraction?: boolean
 } = {}): Harness {
   const profile = mkdtempSync(join(home, 'profile-'))
+  if (extra.millifraction !== undefined) {
+    writeFileSync(join(profile, 'millifraction-coordinates.json'), JSON.stringify({ enabled: extra.millifraction }))
+  }
   const store = new ProfileStore(profile)
   const calls: Harness['calls'] = { create: [], prompt: [], cancel: [], selectModel: [] }
   const savedDefaults: Harness['savedDefaults'] = []
@@ -339,7 +344,8 @@ describe('ball control socket', { concurrency: 1 }, () => {
   })
 
   it('creates a session, changes both models and access, and starts a new chat for millifraction', async () => {
-    const harness = boot()
+    // Start from millifraction off so the toggle below changes state on every platform.
+    const harness = boot({ millifraction: false })
     const client = await connect(harness.runtime)
     try {
       client.send({ type: 'new' })

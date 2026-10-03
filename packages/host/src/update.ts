@@ -211,6 +211,12 @@ export class UpdateChecker {
     this.checking = true
     try {
       const latest = await this.fetch()
+      if (latest === null) {
+        // The repository answered but publishes no release yet: a clean, quiet nothing.
+        this.error = null
+        this.store.setUpdateRecord({ checkedAt: Date.now() })
+        return
+      }
       if (latest === undefined) {
         this.error = 'network'
         return
@@ -272,14 +278,16 @@ export class UpdateChecker {
     return this.own !== undefined && this.latest !== null && compareVersions(this.latest, this.installed) > 0
   }
 
-  private async fetch(): Promise<string | undefined> {
+  private async fetch(): Promise<string | null | undefined> {
     const own = this.own
     if (own === undefined) return undefined
     if (this.deps.fetchLatest !== undefined) return this.deps.fetchLatest(own.name)
     const forced = process.env.DSH_ORB_UPDATE_LATEST?.trim()
     if (forced !== undefined && forced !== '') return forced
     const body = await curlText(`${apiBase()}/releases/latest`)
-    return body === undefined ? undefined : versionFromRelease(body)
+    if (body === undefined) return undefined
+    // An empty body is the repository's 404: no release published yet, not a failure.
+    return versionFromRelease(body) ?? null
   }
 }
 
@@ -352,15 +360,23 @@ function comparePrerelease(left: string, right: string): number {
 /**
  * Fetch a plain-text body. HTTPS answers are pinned to https end to end; a
  * plain-http address (the local mock) keeps its scheme so the loopback works.
+ * Resolves `''` when the server answers 404, `undefined` when the transfer
+ * fails or answers with another non-2xx status.
  */
 async function curlText(url: string): Promise<string | undefined> {
   const proto = url.startsWith('https://') ? ['--proto', '=https', '--proto-redir', '=https'] : []
+  // The Windows schannel backend aborts the handshake when a certificate
+  // revocation check cannot complete — common behind proxies. Skipping it costs
+  // no trust here (the answer is data, not code); other backends ignore the flag.
+  const tls = process.platform === 'win32' ? ['--ssl-no-revoke'] : []
   return new Promise((resolve) => {
     const child = spawn('curl', [
-      '-fsSL',
+      '-sSL',
       ...proto,
+      ...tls,
       '--connect-timeout', '5',
       '--max-time', '15',
+      '-w', '\n%{http_code}',
       url,
     ], { stdio: ['ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
@@ -368,7 +384,13 @@ async function curlText(url: string): Promise<string | undefined> {
     child.stderr.resume()
     child.once('error', () => { resolve(undefined) })
     child.once('exit', (code) => {
-      resolve(code === 0 ? Buffer.concat(out).toString('utf8') : undefined)
+      if (code !== 0) return resolve(undefined)
+      const text = Buffer.concat(out).toString('utf8')
+      const cut = text.lastIndexOf('\n')
+      const status = cut === -1 ? '' : text.slice(cut + 1).trim()
+      const body = cut === -1 ? '' : text.slice(0, cut)
+      if (status === '404') return resolve('')
+      resolve(status.startsWith('2') ? body : undefined)
     })
   })
 }

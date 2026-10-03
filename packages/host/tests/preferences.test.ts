@@ -83,7 +83,8 @@ describe('profile preferences', () => {
     }
     assert.equal(selection.enabled, true)
     assert.equal(selection.translateTargetLanguage, 'en')
-    assert.equal(store.coordinateMode(), 'pixel')
+    // With no profile file, the default follows the platform (pixel on macOS, millifraction on Windows).
+    assert.equal(store.coordinateMode(), defaultMillifraction() ? 'millifraction' : 'pixel')
     store.setMillifractionEnabled(true)
     assert.equal(store.coordinateMode(), 'millifraction')
     assert.equal(JSON.parse(readFileSync(join(path, 'millifraction-coordinates.json'), 'utf8')).enabled, true)
