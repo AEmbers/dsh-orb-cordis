@@ -82,23 +82,31 @@ Helper (its own downloaded Electron, isolated userData)
 
 ### From a release
 
-Once published to npm, install by package name:
+Releases are distributed through GitHub Releases, not npm. The install unit is the release tarball — **not the repository itself**: pasting the repo URL into a plugin page installs the monorepo root package, which fails with "this package declares no bundle".
 
-- **Desktop app**: in the app, open the plugin page and add the package name `dsh-orb`.
-- **CLI** (`dsh web`): `dsh plugin add dsh-orb`.
+- **Desktop app**: open the [Releases page](https://github.com/mini-yifan/dsh-orb-cordis/releases/latest), copy the address of the latest `dsh-orb-x.y.z.tgz` and paste it into the app's plugin page; or download the tgz and add that file instead.
+- **CLI** (`dsh web`):
+
+  ```sh
+  dsh plugin add https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.1.0/dsh-orb-0.1.0.tgz
+  ```
+
+With an older version installed there is no need to reinstall: the floating-ball card in the main window's settings page checks for and installs updates.
+
+The tarball address follows the version: `https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v<version>/dsh-orb-<version>.tgz`.
 
 ### From a local build
 
 ```sh
 pnpm install
 pnpm build
-pnpm --filter dsh-orb pack        # produces ./dsh-orb-0.0.0.tgz
+pnpm --filter dsh-orb pack        # produces ./dsh-orb-<version>.tgz
 ```
 
 Then either add the tarball in the desktop app's plugin page, or:
 
 ```sh
-dsh plugin add ./dsh-orb-0.0.0.tgz
+dsh plugin add ./dsh-orb-<version>.tgz
 ```
 
 After the first installation the helper's Electron runtime is downloaded on first use of the ball, then cached.

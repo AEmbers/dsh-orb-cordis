@@ -82,23 +82,31 @@ Helper（自带的下载版 Electron，独立 userData）
 
 ### 从发布版安装
 
-发布到 npm 后，按包名安装：
+插件以 GitHub Releases 分发，不走 npm。安装单位是 release 里的 tarball——**不是仓库本身**：把仓库链接填进插件页，装到的是 monorepo 根包，会报「这个包没有声明组合包」。
 
-- **桌面版**：应用内打开插件页，添加包名 `dsh-orb`。
-- **CLI**（`dsh web`）：`dsh plugin add dsh-orb`。
+- **桌面版**：打开 [Releases 页](https://github.com/mini-yifan/dsh-orb-cordis/releases/latest)，把最新版 tarball `dsh-orb-x.y.z.tgz` 的地址粘进应用内插件页；或下载 tgz 后在插件页添加该文件。
+- **CLI**（`dsh web`）：
+
+  ```sh
+  dsh plugin add https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.1.0/dsh-orb-0.1.0.tgz
+  ```
+
+已装旧版时无需重装：主窗口设置页的悬浮球卡片可检查并一键更新。
+
+tarball 地址按版本拼出：`https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v<版本>/dsh-orb-<版本>.tgz`。
 
 ### 从本地构建安装
 
 ```sh
 pnpm install
 pnpm build
-pnpm --filter dsh-orb pack        # 生成 ./dsh-orb-0.0.0.tgz
+pnpm --filter dsh-orb pack        # 生成 ./dsh-orb-<version>.tgz
 ```
 
 然后在桌面版插件页添加这个 tarball，或者：
 
 ```sh
-dsh plugin add ./dsh-orb-0.0.0.tgz
+dsh plugin add ./dsh-orb-<version>.tgz
 ```
 
 首次使用悬浮球时会下载 helper 的 Electron 运行时，之后缓存复用。
