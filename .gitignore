@@ -78,5 +78,26 @@ Thumbs.db
 .zcodeignore
 
 # Assembled by packages/bundle/scripts/assemble.mjs
+#
+# NOTE: these two used to be ignored here. They are now force-committed, and the rules are turned
+# into explicit negations rather than deleted, because pnpm's git-dependency install builds its file
+# list from .gitignore: with a plain `packages/bundle/lib/` ignore present, `lib/` and `client.js`
+# were dropped from the install unpack even though git tracked them — the installed package then had
+# no `main`, the install still reported success, and the failure only surfaced at boot.
+# Keep the ignore patterns (so `git status` stays quiet when assemble.mjs regenerates them) with the
+# negations directly beneath (so both git and pnpm keep the files).
 packages/bundle/lib/
+!packages/bundle/lib/
+packages/bundle/lib/**
+!packages/bundle/lib/**
 packages/bundle/client.js
+!packages/bundle/client.js
+
+# Same reasoning for the syntax-highlighting grammars: pnpm's pack must keep them, because the
+# helper lazily imports ./vendor/shiki.js at runtime and assemble.mjs copies packages/helper/assets
+# wholesale.
+packages/helper/assets/vendor/
+!packages/helper/assets/vendor/
+packages/helper/assets/vendor/**
+!packages/helper/assets/vendor/**
+
