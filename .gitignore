@@ -3,16 +3,35 @@ node_modules/
 .pnpm-store/
 
 # Build output
-dist/
 build/
 out/
 *.tsbuildinfo
 .turbo/
 .cache/
 
-# Compiled from packages/*/src by `pnpm build` — never hand-edited
-packages/*/lib/
-packages/helper/assets/vendor/
+# NOTE: the assembled bundle output IS committed on purpose.
+#
+# `dsh plugin add github:AEmbers/dsh-orb-cordis` installs through a git dependency, and npm/pnpm run
+# only the `prepare` lifecycle script for git installs — never `prepack`/`prepublishOnly`, and never a
+# workspace-wide `pnpm build`. So if `packages/bundle/{lib,dist,client.js,package.json}` are not in the
+# tree, the installed package has no `main` (`lib/index.js`), the install still succeeds silently, and
+# the failure only shows up at boot.
+#
+# These entries used to be:
+#   dist/
+#   packages/*/lib/
+#   packages/bundle/client.js
+# They are relaxed here so the assembled `dsh-orb` package is installable straight from git.
+# `packages/*/src` stays the source of truth; regenerate with `pnpm build` then
+# `node packages/bundle/scripts/assemble.mjs`.
+# (No `dist/` or `packages/*/lib/` rules remain — those directories now live in the tree on purpose.)
+
+# Compiled from packages/*/src by `pnpm build` — never hand-edited.
+#
+# Also committed on purpose: the helper loads the syntax-highlighting grammars lazily at runtime
+# (`packages/helper/assets/highlight.js` does `import('./vendor/shiki.js')`), and assembling the
+# bundle only copies `packages/helper/assets` — so a tree without this directory ships a helper whose
+# highlighting silently fails. `packages/*/src` remains the source of truth; regenerate with `pnpm build`.
 
 # Package artifacts
 *.tgz

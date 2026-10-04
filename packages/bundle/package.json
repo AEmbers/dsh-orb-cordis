@@ -1,6 +1,6 @@
 {
   "name": "dsh-orb",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Installable Orb bundle. Inserts the Computer Use preset and the floating-ball host.",
   "main": "lib/index.js",
@@ -37,12 +37,16 @@
     "pack": "node ./scripts/pack.mjs"
   },
   "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.1.7-rc.2 <0.3.0-0"
+  },
   "dependencies": {
     "koffi": "^3.1.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/cordis": ">=4.0.4 <5",
     "@deepseek-ai/dsh-agent": ">=0.1.7-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-api-session-controller": ">=0.1.7-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-attachment": ">=0.1.7-rc.2 <0.3.0-0",
@@ -55,7 +59,7 @@
     "@deepseek-ai/dsh-tools": ">=0.1.7-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-user-approval": ">=0.1.7-rc.2 <0.3.0-0",
     "@deepseek-ai/dsh-user-questions": ">=0.1.7-rc.2 <0.3.0-0",
-    "@deepseek-ai/schemastery": "3.18.4"
+    "@deepseek-ai/schemastery": ">=3.18.4 <4"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-session-projection": {
@@ -84,6 +88,15 @@
     "@dsh-orb/native-selection": "workspace:*"
   },
   "dsh": {
+    "compatibility": {
+      "dsh": ">=0.1.7-rc.2 <0.3.0-0",
+      "dshReleases": {
+        "0.1.7-rc.2": "compatible",
+        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "compatible"
+      }
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings"
